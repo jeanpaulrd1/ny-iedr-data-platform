@@ -8,7 +8,8 @@ This directory contains comprehensive unit tests for the data transformation pip
 tests/
 ├── conftest.py                      # Shared pytest fixtures (SparkSession)
 ├── test_helpers.py                  # Tests for helper utilities
-├── test_schema_normalization.py     # Tests for Silver transformations ✅ NEW
+├── test_schema_normalization.py     # Tests for Silver transformations ✅
+├── test_gold_scd2.py                # Tests for Gold SCD Type 2 logic ✅ NEW
 └── README.md                        # This file
 ```
 
@@ -21,7 +22,7 @@ Tests for `pipelines/utils/helpers.py`:
 * ✅ `compute_record_hash()` - SHA-256 record hashing for SCD2
 * ✅ `add_lineage_columns()` - Lineage metadata injection
 
-### `test_schema_normalization.py` ✅ NEW
+### `test_schema_normalization.py`
 Tests for `pipelines/utils/schema_normalization.py`:
 
 **TestAggregateUtility1Segments** (4 tests):
@@ -49,7 +50,35 @@ Tests for `pipelines/utils/schema_normalization.py`:
 * ✅ Unresolved feeder handling (NULL `feeder_id`)
 * ✅ Composite `der_id` preservation for hybrid projects
 
-**Total: 20+ test cases covering all Silver transformation logic**
+### `test_gold_scd2.py` ✅ NEW
+Tests for `pipelines/03_gold_scd2.py` SCD Type 2 logic:
+
+**TestCircuitsSCD2Logic** (4 tests):
+* ✅ Detects capacity changes (triggers new SCD2 version)
+* ✅ Ignores lineage column changes (no false versions)
+* ✅ Sequence by `hca_refresh_date` (determines version order)
+* ✅ Composite key validation (feeder_id uniqueness)
+
+**TestDerSCD2Logic** (5 tests):
+* ✅ Composite key (der_id, der_type) for hybrid projects
+* ✅ Detects DER capacity changes
+* ✅ Detects feeder_id changes (DER moving between feeders)
+* ✅ Sequence by `ingestion_timestamp`
+* ✅ Tracks planned installation date changes
+
+**TestSCD2Configuration** (5 tests):
+* ✅ Circuits `except_column_list` defined correctly
+* ✅ Circuits `track_history_column_list` complete
+* ✅ DER tracks `feeder_id` (projects can move)
+* ✅ Planned DER tracks installation date and queue ID
+* ✅ Composite keys defined correctly
+
+**TestSCD2EdgeCases** (3 tests):
+* ✅ Handles NULL `feeder_id` (unresolved DER)
+* ✅ Multiple changes in same run
+* ✅ Same sequence date with different values
+
+**Total Gold Tests: 17 tests covering SCD2 behavior**
 
 ---
 
@@ -74,20 +103,26 @@ pytest tests/test_helpers.py -v
 
 # Test Silver transformations only
 pytest tests/test_schema_normalization.py -v
+
+# Test Gold SCD2 logic only
+pytest tests/test_gold_scd2.py -v
 ```
 
 ### Run Specific Test Class
 ```bash
-# Test only utility 1 segment aggregation
-pytest tests/test_schema_normalization.py::TestAggregateUtility1Segments -v
+# Test only circuits SCD2 logic
+pytest tests/test_gold_scd2.py::TestCircuitsSCD2Logic -v
 
-# Test only DER unpivot
-pytest tests/test_schema_normalization.py::TestUnpivotUtility1Der -v
+# Test only DER SCD2 logic
+pytest tests/test_gold_scd2.py::TestDerSCD2Logic -v
+
+# Test only SCD2 configuration
+pytest tests/test_gold_scd2.py::TestSCD2Configuration -v
 ```
 
 ### Run Single Test
 ```bash
-pytest tests/test_schema_normalization.py::TestUnpivotUtility1Der::test_unpivots_hybrid_project -v
+pytest tests/test_gold_scd2.py::TestCircuitsSCD2Logic::test_detects_capacity_change -v
 ```
 
 ---
@@ -95,36 +130,35 @@ pytest tests/test_schema_normalization.py::TestUnpivotUtility1Der::test_unpivots
 ## 📊 Test Output Example
 
 ```
+tests/test_helpers.py::TestStripUtf8Bom::test_removes_bom_from_single_column PASSED
 tests/test_schema_normalization.py::TestAggregateUtility1Segments::test_aggregates_segments_to_feeder PASSED
-tests/test_schema_normalization.py::TestAggregateUtility1Segments::test_max_hosting_capacity_not_sum PASSED
 tests/test_schema_normalization.py::TestUnpivotUtility1Der::test_unpivots_hybrid_project PASSED
-tests/test_schema_normalization.py::TestUnpivotUtility1Der::test_handles_null_feeder_id PASSED
-tests/test_schema_normalization.py::TestMapCircuitsToCanonical::test_maps_utility1_fields PASSED
-tests/test_schema_normalization.py::TestMapDerToCanonical::test_preserves_composite_der_id PASSED
+tests/test_gold_scd2.py::TestCircuitsSCD2Logic::test_detects_capacity_change PASSED
+tests/test_gold_scd2.py::TestCircuitsSCD2Logic::test_ignores_lineage_column_changes PASSED
+tests/test_gold_scd2.py::TestDerSCD2Logic::test_composite_key_der_id_and_type PASSED
+tests/test_gold_scd2.py::TestSCD2Configuration::test_circuits_except_columns_defined PASSED
 
-==================== 20 passed in 15.23s ====================
+==================== 53 passed in 18.47s ====================
 ```
 
 ---
 
 ## 🧩 What's Tested vs. What's Missing
 
-### ✅ Covered (Silver Layer Transformations)
-* Utility 1 segment aggregation logic (MAX vs SUM)
-* Utility 1 DER unpivot (14 tech columns → narrow)
-* Canonical field mapping (both utilities)
-* NULL handling and edge cases
-* Composite DER keys for hybrid projects
-* Timestamp parsing with timezone offsets
-* Helper functions (BOM removal, null normalization, hashing)
+### ✅ Covered
+* **Helper utilities** (BOM removal, null normalization, hashing, lineage)
+* **Silver transformations** (segment aggregation, DER unpivot, field mapping)
+* **Gold SCD2 logic** (change detection, sequence ordering, composite keys)
+* **SCD2 configuration** (except_column_list, track_history_column_list)
+* **Edge cases** (NULL handling, hybrid projects, unresolved DER)
 
 ### ❌ Not Yet Covered (Future Work)
 * Integration tests: Full Bronze → Silver → Gold pipeline
-* DLT expectations enforcement (`@dlt.expect_or_drop`)
-* Data quality metrics aggregation
-* Gold layer SCD Type 2 logic (when implemented)
+* DLT runtime execution (these are unit tests simulating behavior)
+* API views (`04_gold_api_views.py` - to be implemented)
+* Data quality metrics aggregation (`05_gold_data_quality.py` - to be implemented)
 * Auto Loader file ingestion
-* Edge cases: Large files, corrupt data, schema evolution
+* Performance tests (large datasets, clustering efficiency)
 
 ---
 
@@ -184,6 +218,16 @@ class TestMyNewFunction:
 4. **Each test** should be independent, fast, and deterministic
 5. **Mock external dependencies** (file system, APIs) when possible
 
+### SCD2 Testing Approach
+
+Since DLT's `apply_changes` is a runtime operation, these tests:
+* **Simulate expected behavior** (what SCD2 should do)
+* **Validate configuration** (keys, sequence columns, tracked columns)
+* **Test change detection logic** (what triggers new versions)
+* **Verify edge cases** (NULL handling, composite keys, lineage exclusion)
+
+Integration tests would validate actual DLT execution with real pipelines.
+
 ---
 
 ## 📚 References
@@ -191,3 +235,4 @@ class TestMyNewFunction:
 * [pytest Documentation](https://docs.pytest.org/)
 * [PySpark Testing Best Practices](https://spark.apache.org/docs/latest/api/python/user_guide/testing.html)
 * [Databricks DLT Testing Guide](https://docs.databricks.com/delta-live-tables/testing.html)
+* [DLT APPLY CHANGES Documentation](https://docs.databricks.com/delta-live-tables/cdc.html)
