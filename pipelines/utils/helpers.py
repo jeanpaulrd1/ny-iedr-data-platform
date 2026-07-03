@@ -6,7 +6,7 @@ for use across Bronze, Silver, and Gold layers.
 
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
@@ -112,7 +112,7 @@ def compute_record_hash(df: DataFrame, key_columns: list) -> DataFrame:
     return df.withColumn("record_hash", F.sha2(concat_expr, 256))
 
 
-def normalize_null_sentinels(df: DataFrame, columns: list) -> DataFrame:
+def normalize_null_sentinels(df: DataFrame, columns: Optional[List[str]] = None) -> DataFrame:
     """Normalize string null sentinels to true SQL NULL.
     
     Converts common null-representing strings to true NULL values.
@@ -120,15 +120,26 @@ def normalize_null_sentinels(df: DataFrame, columns: list) -> DataFrame:
     
     Args:
         df: Input DataFrame
-        columns: List of column names to normalize
+        columns: List of column names to normalize. If None, auto-detects all string columns.
         
     Returns:
         DataFrame with normalized NULL values
         
     Example:
-        >>> # Utility 1 uses "NULL" string, utility 2 uses "null"
+        >>> # Explicit columns
         >>> df = normalize_null_sentinels(df, ['feeder_id', 'project_circuit_id'])
+        >>> 
+        >>> # Auto-detect string columns (recommended for DLT)
+        >>> df = normalize_null_sentinels(df)
+        
+    Note:
+        Auto-detection triggers one schema analysis per call, which is acceptable
+        since it's done once per DLT function invocation (not in a loop).
     """
+    # Auto-detect string columns if not provided
+    if columns is None:
+        columns = [col_name for col_name, dtype in df.dtypes if dtype == "string"]
+    
     null_sentinels = ['NULL', 'null', 'N/A', 'NA', '']
     
     # Build all column transformations at once for performance
@@ -156,15 +167,40 @@ def strip_utf8_bom(df: DataFrame) -> DataFrame:
         DataFrame with cleaned column names
         
     Example:
-        >>> # Column name: '\\ufeffDER_ID' -> 'DER_ID'
         >>> df = strip_utf8_bom(df)
     """
-    # Compute columns ONCE to avoid repeated Analyze RPCs
-    original_columns = df.columns
-    cleaned_columns = [col_name.replace('\ufeff', '') for col_name in original_columns]
+    # Check if any column has BOM
+    bom_cols = [c for c in df.columns if c.startswith('\ufeff')]
     
-    # Use toDF() for single operation instead of looping withColumnRenamed
-    if original_columns != cleaned_columns:
-        df = df.toDF(*cleaned_columns)
+    if not bom_cols:
+        return df
+    
+    # Rename columns to remove BOM
+    for old_name in bom_cols:
+        new_name = old_name.replace('\ufeff', '')
+        df = df.withColumnRenamed(old_name, new_name)
     
     return df
+
+
+def extract_utility_id_from_path(path: str) -> str:
+    """Extract utility ID from file path.
+    
+    Path format: /Volumes/.../landing/{utility_id}/{dataset_type}/*.csv
+    
+    Args:
+        path: Full file path
+        
+    Returns:
+        Extracted utility_id or 'unknown'
+        
+    Example:
+        >>> extract_utility_id_from_path("/Volumes/main/data/landing/utility1/circuits/file.csv")
+        'utility1'
+    """
+    parts = path.split('/')
+    try:
+        landing_idx = parts.index('landing')
+        return parts[landing_idx + 1]
+    except (ValueError, IndexError):
+        return 'unknown'
