@@ -94,7 +94,8 @@ def normalize_null_sentinels(df: DataFrame, columns: Optional[List[str]] = None)
     """Normalize string null sentinels to true SQL NULL.
     
     Converts common null-representing strings to true NULL values.
-    Handles: 'NULL', 'null', 'N/A', 'NA', empty string.
+    Handles: 'NULL', 'null', 'N/A', 'n/a', 'NA', empty string, and whitespace-only strings.
+    Trims whitespace before checking.
     
     Args:
         df: Input DataFrame
@@ -118,13 +119,19 @@ def normalize_null_sentinels(df: DataFrame, columns: Optional[List[str]] = None)
     if columns is None:
         columns = [col_name for col_name, dtype in df.dtypes if dtype == "string"]
     
-    null_sentinels = ['NULL', 'null', 'N/A', 'NA', '']
+    # Return early if no columns to process
+    if not columns:
+        return df
+    
+    null_sentinels = ['NULL', 'null', 'N/A', 'n/a', 'NA', '']
     
     # Build all column transformations at once for performance
     transformations = {}
     for col_name in columns:
+        # Trim whitespace first, then check if it's a null sentinel
+        trimmed_col = F.trim(F.col(col_name))
         transformations[col_name] = F.when(
-            F.col(col_name).isin(null_sentinels), None
+            trimmed_col.isin(null_sentinels), None
         ).otherwise(F.col(col_name))
     
     df = df.withColumns(transformations)
@@ -170,14 +177,14 @@ def extract_utility_id_from_path(path: str) -> str:
         path: Full file path
         
     Returns:
-        Extracted utility_id or 'unknown'
+        Utility ID (or 'unknown' if pattern doesn't match)
         
     Example:
-        >>> extract_utility_id_from_path("/Volumes/main/data/landing/utility1/circuits/file.csv")
-        'utility1'
+        >>> extract_utility_id_from_path("/Volumes/dev/bronze/landing/utility_1/circuits/file.csv")
+        'utility_1'
     """
-    parts = path.split('/')
     try:
+        parts = path.split('/')
         landing_idx = parts.index('landing')
         return parts[landing_idx + 1]
     except (ValueError, IndexError):

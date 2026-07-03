@@ -6,23 +6,23 @@ from pyspark.sql import SparkSession
 
 @pytest.fixture(scope="session")
 def spark():
-    """Get or create a SparkSession for testing.
+    """Get the active SparkSession for testing.
     
-    Session-scoped fixture that reuses the existing Databricks SparkSession
-    on Serverless compute (Spark Connect) or creates a local session for
-    development environments.
+    Session-scoped fixture that reuses the existing Databricks SparkSession.
+    On Databricks Serverless, a SparkSession is always active and available.
     
-    Note: On Databricks Serverless, DO NOT set .master() as Spark Connect
-    is already configured and cannot coexist with a local master.
+    Note: This fixture does NOT create a new session - it uses the one
+    provided by the Databricks runtime environment.
     """
-    # Get existing session or create one (works on Databricks Serverless + local)
-    spark = SparkSession.builder \
-        .appName("ny-iedr-test") \
-        .getOrCreate()
+    # Get the active session (available in Databricks notebooks and compute)
+    active_session = SparkSession.getActiveSession()
     
-    yield spark
+    if active_session is None:
+        raise RuntimeError(
+            "No active SparkSession found. "
+            "Tests must be run on Databricks compute where a SparkSession is pre-configured."
+        )
     
-    # Don't stop the session on Databricks (it's shared with the cluster)
-    # Only stop if running locally
-    if spark.conf.get("spark.master", "").startswith("local"):
-        spark.stop()
+    yield active_session
+    
+    # Don't stop the session - it's managed by Databricks
