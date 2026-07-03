@@ -141,17 +141,17 @@ class TestDerSCD2Logic:
         # Feeder changed (feeder1 → feeder2)
         assert run1.select("feeder_id").collect()[0][0] != run2.select("feeder_id").collect()[0][0]
     
-    def test_sequence_by_ingestion_timestamp(self, spark):
-        """Test that ingestion_timestamp determines DER version order."""
+    def test_sequence_by_ingestion_date(self, spark):
+        """Test that ingestion_date determines DER version order (day-level granularity)."""
         data = spark.createDataFrame([
-            ("utility1_proj1_SolarPV", "SolarPV", "75.0", "2024-02-15 11:00:00"),
-            ("utility1_proj1_SolarPV", "SolarPV", "50.0", "2024-01-15 10:00:00"),
-        ], ["der_id", "der_type", "nameplate_rating_kw", "ingestion_timestamp"])
+            ("utility1_proj1_SolarPV", "SolarPV", "75.0", date(2024, 2, 15), "2024-02-15 11:00:00"),
+            ("utility1_proj1_SolarPV", "SolarPV", "50.0", date(2024, 1, 15), "2024-01-15 10:00:00"),
+        ], ["der_id", "der_type", "nameplate_rating_kw", "ingestion_date", "ingestion_timestamp"])
         
-        ordered = data.orderBy("ingestion_timestamp")
+        ordered = data.orderBy("ingestion_date")
         rows = ordered.collect()
         
-        # Earlier timestamp first
+        # Earlier date first (despite different timestamps)
         assert rows[0].nameplate_rating_kw == "50.0"
         assert rows[1].nameplate_rating_kw == "75.0"
     
@@ -241,6 +241,24 @@ class TestSCD2Configuration:
         assert len(der_keys) == 2
         assert "der_id" in der_keys
         assert "der_type" in der_keys
+    
+    def test_sequence_column_not_in_except_list(self):
+        """Test that sequence_by columns are NOT in except_column_list (critical validation)."""
+        # Circuits configuration
+        circuits_sequence = "hca_refresh_date"
+        circuits_except = ["ingestion_timestamp", "ingestion_date", "pipeline_update_id"]
+        assert circuits_sequence not in circuits_except, \
+            f"CRITICAL BUG: {circuits_sequence} is used for sequencing but excluded from change detection!"
+        
+        # DER configuration (both installed and planned use same pattern)
+        der_sequence = "ingestion_date"  # FIXED: Changed from ingestion_timestamp
+        der_except = ["ingestion_timestamp", "pipeline_update_id"]  # FIXED: ingestion_date removed
+        assert der_sequence not in der_except, \
+            f"CRITICAL BUG: {der_sequence} is used for sequencing but excluded from change detection!"
+        
+        # Validate that ingestion_timestamp IS in except_list (should be excluded)
+        assert "ingestion_timestamp" in der_except, \
+            "ingestion_timestamp should be in except_column_list to ignore hour/minute changes"
 
 
 class TestSCD2EdgeCases:
@@ -280,3 +298,26 @@ class TestSCD2EdgeCases:
         assert data.count() == 2
         capacities = [row.max_hosting_capacity_mw for row in data.collect()]
         assert len(set(capacities)) == 2  # Two distinct values
+    
+    def test_same_day_reruns_dont_create_versions(self, spark):
+        """Test that multiple pipeline runs on same day don't create false DER versions."""
+        # Run 1 on 2024-01-15 morning
+        run1 = spark.createDataFrame([
+            ("utility1_proj1_SolarPV", "SolarPV", "50.0", date(2024, 1, 15), "2024-01-15 08:00:00"),
+        ], ["der_id", "der_type", "nameplate_rating_kw", "ingestion_date", "ingestion_timestamp"])
+        
+        # Run 2 on 2024-01-15 afternoon (same day, different timestamp)
+        run2 = spark.createDataFrame([
+            ("utility1_proj1_SolarPV", "SolarPV", "50.0", date(2024, 1, 15), "2024-01-15 14:00:00"),
+        ], ["der_id", "der_type", "nameplate_rating_kw", "ingestion_date", "ingestion_timestamp"])
+        
+        # ingestion_date is same (sequence_by column)
+        assert run1.select("ingestion_date").collect()[0][0] == run2.select("ingestion_date").collect()[0][0]
+        
+        # ingestion_timestamp is different (but excluded via except_column_list)
+        assert run1.select("ingestion_timestamp").collect()[0][0] != run2.select("ingestion_timestamp").collect()[0][0]
+        
+        # Business data is identical
+        assert run1.select("nameplate_rating_kw").collect()[0][0] == run2.select("nameplate_rating_kw").collect()[0][0]
+        
+        # Result: No new SCD2 version should be created (same ingestion_date + same business data)

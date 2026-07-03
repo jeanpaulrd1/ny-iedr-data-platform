@@ -130,24 +130,6 @@ def circuits_standardized():
 
     canonical = map_circuits_to_canonical(combined)
 
-    # record_hash: SHA-256 of business columns for change detection at Gold.
-    # Gold's APPLY CHANGES INTO uses this as the sequence signal — a new SCD2
-    # row is only created when record_hash changes, not on every pipeline run.
-    canonical = canonical.withColumn(
-        "record_hash",
-        F.sha2(
-            F.concat_ws(
-                "|",
-                F.coalesce(F.col("voltage_kv").cast("string"), F.lit("")),
-                F.coalesce(F.col("max_hosting_capacity_mw").cast("string"), F.lit("")),
-                F.coalesce(F.col("min_hosting_capacity_mw").cast("string"), F.lit("")),
-                F.coalesce(F.col("hca_refresh_date").cast("string"), F.lit("")),
-                F.coalesce(F.col("color_code"), F.lit("")),
-                F.coalesce(F.col("shape_length").cast("string"), F.lit("")),
-            ),
-            256,
-        ),
-    )
 
     return canonical
 
@@ -218,20 +200,6 @@ def der_installed_standardized():
     combined = utility1_unpivoted.unionByName(utility2_df, allowMissingColumns=False)
     canonical = map_der_to_canonical(combined, der_table_type="installed")
 
-    # record_hash for Gold SCD2 change detection
-    canonical = canonical.withColumn(
-        "record_hash",
-        F.sha2(
-            F.concat_ws(
-                "|",
-                F.coalesce(F.col("feeder_id"), F.lit("")),
-                F.coalesce(F.col("der_type"), F.lit("")),
-                F.coalesce(F.col("nameplate_rating_kw").cast("string"), F.lit("")),
-                F.coalesce(F.col("der_status"), F.lit("")),
-            ),
-            256,
-        ),
-    )
 
     return canonical
 
@@ -296,21 +264,6 @@ def der_planned_standardized():
     combined = utility1_unpivoted.unionByName(utility2_df, allowMissingColumns=False)
     canonical = map_der_to_canonical(combined, der_table_type="planned")
 
-    canonical = canonical.withColumn(
-        "record_hash",
-        F.sha2(
-            F.concat_ws(
-                "|",
-                F.coalesce(F.col("feeder_id"), F.lit("")),
-                F.coalesce(F.col("der_type"), F.lit("")),
-                F.coalesce(F.col("nameplate_rating_kw").cast("string"), F.lit("")),
-                F.coalesce(F.col("der_status"), F.lit("")),
-                F.coalesce(F.col("planned_installation_date").cast("string"), F.lit("")),
-                F.coalesce(F.col("interconnection_queue_id"), F.lit("")),
-            ),
-            256,
-        ),
-    )
 
     return canonical
 

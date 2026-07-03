@@ -12,7 +12,25 @@ Key Features:
 - Maintains __START_AT, __END_AT, __IS_CURRENT columns automatically
 - Liquid clustering optimized for temporal and lookup queries
 - No partitioning (history grows linearly, clustering handles efficiently)
-- Excludes lineage columns from change detection (ingestion_timestamp, etc.)
+- Excludes lineage columns from change detection (ingestion_timestamp, pipeline_update_id)
+
+Sequence Strategy:
+- Circuits: sequence_by=hca_refresh_date (business timestamp from source data)
+- DER: sequence_by=ingestion_date (day-level granularity, prevents false versions from same-day reruns)
+  * ingestion_timestamp (hour/minute) is excluded via except_column_list
+  * ingestion_date is used for sequencing (multiple runs same day = no new version)
+
+SCD2 Configuration Notes:
+- except_column_list: Columns excluded from change detection (changes don't create new versions)
+- track_history_column_list: Columns explicitly tracked for changes (changes DO create new versions)
+- Any column not in either list: Changes are still detected (default behavior)
+- except_column_list takes precedence: If a column is in both lists, it's excluded
+
+Same-Day Limitation:
+- DER tables use ingestion_date (day-level) as sequence_by
+- Multiple pipeline runs on the same day with different data: Only the last run persists
+- Intra-day corrections are silently overwritten (no version history)
+- For sub-daily versioning, use ingestion_timestamp but accept false versions on reruns
 
 Tables:
 1. circuits_current: Feeder capacity history
@@ -39,7 +57,7 @@ dlt.create_target_table(
 dlt.apply_changes(
     target="circuits_current",
     source="circuits_standardized",
-    keys=["feeder_id"],
+    keys=["utility_id", "feeder_id"],  # FIXED: Added utility_id for explicit multi-tenant key
     sequence_by="hca_refresh_date",
     stored_as_scd_type=2,
     except_column_list=[
@@ -48,13 +66,13 @@ dlt.apply_changes(
         "pipeline_update_id"
     ],
     track_history_column_list=[
-        "utility_id",
         "native_feeder_id",
         "voltage_kv",
         "max_hosting_capacity_mw",
         "min_hosting_capacity_mw",
         "color_code",
         "shape_length"
+        # Note: utility_id is in keys, not track_history (keys are always tracked)
     ]
 )
 
@@ -76,19 +94,19 @@ dlt.apply_changes(
     target="der_installed_current",
     source="der_installed_standardized",
     keys=["der_id", "der_type"],
-    sequence_by="ingestion_timestamp",
+    sequence_by="ingestion_date",  # Day-level sequencing (not timestamp)
     stored_as_scd_type=2,
     except_column_list=[
-        "ingestion_timestamp",
-        "ingestion_date",
+        "ingestion_timestamp",  # Hour/minute changes ignored
         "pipeline_update_id"
+        # Note: ingestion_date is NOT in except_column_list (it drives sequencing)
     ],
     track_history_column_list=[
         "utility_id",
         "feeder_id",
         "native_feeder_id_raw",
-        "nameplate_rating_kw",
-        "der_status"
+        "nameplate_rating_kw"
+        # Note: der_status removed from track_history - see API views for proper status handling
     ]
 )
 
@@ -110,20 +128,20 @@ dlt.apply_changes(
     target="der_planned_current",
     source="der_planned_standardized",
     keys=["der_id", "der_type"],
-    sequence_by="ingestion_timestamp",
+    sequence_by="ingestion_date",  # Day-level sequencing (not timestamp)
     stored_as_scd_type=2,
     except_column_list=[
-        "ingestion_timestamp",
-        "ingestion_date",
+        "ingestion_timestamp",  # Hour/minute changes ignored
         "pipeline_update_id"
+        # Note: ingestion_date is NOT in except_column_list (it drives sequencing)
     ],
     track_history_column_list=[
         "utility_id",
         "feeder_id",
         "native_feeder_id_raw",
         "nameplate_rating_kw",
-        "der_status",
         "planned_installation_date",
         "interconnection_queue_id"
+        # Note: der_status removed from track_history - see API views for proper status handling
     ]
 )

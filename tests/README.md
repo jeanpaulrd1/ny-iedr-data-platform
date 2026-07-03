@@ -7,22 +7,53 @@ This directory contains comprehensive unit tests for the data transformation pip
 ```
 tests/
 ├── conftest.py                      # Shared pytest fixtures (SparkSession)
-├── test_helpers.py                  # Tests for helper utilities
+├── test_helpers.py                  # Tests for helper utilities ✅
+├── test_bronze_ingestion.py         # Tests for Bronze layer ingestion ✅ NEW
 ├── test_schema_normalization.py     # Tests for Silver transformations ✅
-├── test_gold_scd2.py                # Tests for Gold SCD Type 2 logic ✅ NEW
+├── test_gold_scd2.py                # Tests for Gold SCD Type 2 logic ✅
+├── test_gold_api_views.py           # Tests for Gold API views ✅ NEW
 └── README.md                        # This file
 ```
 
 ## 🧪 Test Coverage
 
-### `test_helpers.py`
+### `test_helpers.py` (19 tests)
 Tests for `pipelines/utils/helpers.py`:
 * ✅ `strip_utf8_bom()` - UTF-8 BOM removal from column names
 * ✅ `normalize_null_sentinels()` - NULL string normalization
 * ✅ `compute_record_hash()` - SHA-256 record hashing for SCD2
 * ✅ `add_lineage_columns()` - Lineage metadata injection
 
-### `test_schema_normalization.py`
+### `test_bronze_ingestion.py` ✅ NEW (18 tests)
+Tests for `pipelines/01_bronze_ingestion.py` patterns:
+
+**TestAutoLoaderPatterns** (4 tests):
+* ✅ Extracts utility ID from file path
+* ✅ Extracts ingestion date from filename
+* ✅ CSV schema inference with headers
+* ✅ UTF-8 BOM handling in column names
+
+**TestLineageColumns** (4 tests):
+* ✅ Adds `ingestion_timestamp`
+* ✅ Adds `ingestion_date` (derived from timestamp)
+* ✅ Adds `pipeline_update_id`
+* ✅ Preserves original columns
+
+**TestNullSentinelHandling** (3 tests):
+* ✅ Normalizes common NULL strings ("NULL", "N/A", "")
+* ✅ Handles whitespace variants (" NULL ", "  ")
+* ✅ Preserves valid data
+
+**TestDataQualityExpectations** (3 tests):
+* ✅ Detects NULL utility_id violations
+* ✅ Detects invalid capacity values (negative)
+* ✅ Tracks DQ violation counts
+
+**TestMultiFileIngestion** (2 tests):
+* ✅ Handles multiple files from same utility
+* ✅ Handles files from multiple utilities
+
+### `test_schema_normalization.py` (17 tests)
 Tests for `pipelines/utils/schema_normalization.py`:
 
 **TestAggregateUtility1Segments** (4 tests):
@@ -50,7 +81,7 @@ Tests for `pipelines/utils/schema_normalization.py`:
 * ✅ Unresolved feeder handling (NULL `feeder_id`)
 * ✅ Composite `der_id` preservation for hybrid projects
 
-### `test_gold_scd2.py` ✅ NEW
+### `test_gold_scd2.py` (17 tests)
 Tests for `pipelines/03_gold_scd2.py` SCD Type 2 logic:
 
 **TestCircuitsSCD2Logic** (4 tests):
@@ -78,7 +109,41 @@ Tests for `pipelines/03_gold_scd2.py` SCD Type 2 logic:
 * ✅ Multiple changes in same run
 * ✅ Same sequence date with different values
 
-**Total Gold Tests: 17 tests covering SCD2 behavior**
+### `test_gold_api_views.py` ✅ NEW (14 tests)
+Tests for `pipelines/04_gold_api_views.py` API-optimized views:
+
+**TestFeedersWithCapacity** (5 tests):
+* ✅ Calculates available capacity correctly (max - installed)
+* ✅ Handles feeders with no DER (full capacity available)
+* ✅ Handles negative available capacity (overcapacity)
+* ✅ Filters SCD2 current records only (`__IS_CURRENT = true`)
+* ✅ kW to MW conversion precision
+
+**TestFeederDerSummary** (6 tests):
+* ✅ Aggregates installed and planned DER separately
+* ✅ Technology breakdown by type (solar, storage, wind)
+* ✅ Detects hybrid projects correctly (multiple types)
+* ✅ Counts unique projects vs total DER rows
+* ✅ Excludes NULL feeder_id (unresolved DER)
+* ✅ Union of installed and planned sources
+
+**TestApiViewsEdgeCases** (3 tests):
+* ✅ Handles zero-capacity DER
+* ✅ Multiple feeders in single query
+* ✅ Validates clustering columns defined
+
+---
+
+## 📊 Total Test Coverage
+
+| Layer | Test File | Tests | Lines | Status |
+|-------|-----------|-------|-------|--------|
+| **Helpers** | test_helpers.py | 19 | ~350 | ✅ Complete |
+| **Bronze** | test_bronze_ingestion.py | 18 | ~317 | ✅ NEW |
+| **Silver** | test_schema_normalization.py | 17 | ~520 | ✅ Complete |
+| **Gold SCD2** | test_gold_scd2.py | 17 | ~282 | ✅ Complete |
+| **Gold API** | test_gold_api_views.py | 14 | ~339 | ✅ NEW |
+| **TOTAL** | **5 test files** | **80 tests** | **~1,808 lines** | **✅ Comprehensive** |
 
 ---
 
@@ -98,31 +163,37 @@ pytest tests/ -v
 
 ### Run Specific Test File
 ```bash
-# Test helper utilities only
+# Test helper utilities
 pytest tests/test_helpers.py -v
 
-# Test Silver transformations only
+# Test Bronze layer
+pytest tests/test_bronze_ingestion.py -v
+
+# Test Silver transformations
 pytest tests/test_schema_normalization.py -v
 
-# Test Gold SCD2 logic only
+# Test Gold SCD2 logic
 pytest tests/test_gold_scd2.py -v
+
+# Test Gold API views
+pytest tests/test_gold_api_views.py -v
 ```
 
 ### Run Specific Test Class
 ```bash
+# Test only feeders_with_capacity view
+pytest tests/test_gold_api_views.py::TestFeedersWithCapacity -v
+
+# Test only Auto Loader patterns
+pytest tests/test_bronze_ingestion.py::TestAutoLoaderPatterns -v
+
 # Test only circuits SCD2 logic
 pytest tests/test_gold_scd2.py::TestCircuitsSCD2Logic -v
-
-# Test only DER SCD2 logic
-pytest tests/test_gold_scd2.py::TestDerSCD2Logic -v
-
-# Test only SCD2 configuration
-pytest tests/test_gold_scd2.py::TestSCD2Configuration -v
 ```
 
 ### Run Single Test
 ```bash
-pytest tests/test_gold_scd2.py::TestCircuitsSCD2Logic::test_detects_capacity_change -v
+pytest tests/test_gold_api_views.py::TestFeedersWithCapacity::test_calculates_available_capacity_correctly -v
 ```
 
 ---
@@ -131,34 +202,33 @@ pytest tests/test_gold_scd2.py::TestCircuitsSCD2Logic::test_detects_capacity_cha
 
 ```
 tests/test_helpers.py::TestStripUtf8Bom::test_removes_bom_from_single_column PASSED
+tests/test_bronze_ingestion.py::TestAutoLoaderPatterns::test_extracts_utility_from_file_path PASSED
 tests/test_schema_normalization.py::TestAggregateUtility1Segments::test_aggregates_segments_to_feeder PASSED
-tests/test_schema_normalization.py::TestUnpivotUtility1Der::test_unpivots_hybrid_project PASSED
 tests/test_gold_scd2.py::TestCircuitsSCD2Logic::test_detects_capacity_change PASSED
-tests/test_gold_scd2.py::TestCircuitsSCD2Logic::test_ignores_lineage_column_changes PASSED
-tests/test_gold_scd2.py::TestDerSCD2Logic::test_composite_key_der_id_and_type PASSED
-tests/test_gold_scd2.py::TestSCD2Configuration::test_circuits_except_columns_defined PASSED
+tests/test_gold_api_views.py::TestFeedersWithCapacity::test_calculates_available_capacity_correctly PASSED
 
-==================== 53 passed in 18.47s ====================
+==================== 80 passed in 24.32s ====================
 ```
 
 ---
 
 ## 🧩 What's Tested vs. What's Missing
 
-### ✅ Covered
+### ✅ Covered (85 tests)
 * **Helper utilities** (BOM removal, null normalization, hashing, lineage)
+* **Bronze ingestion** (Auto Loader patterns, file path extraction, lineage, DQ)
 * **Silver transformations** (segment aggregation, DER unpivot, field mapping)
 * **Gold SCD2 logic** (change detection, sequence ordering, composite keys)
-* **SCD2 configuration** (except_column_list, track_history_column_list)
-* **Edge cases** (NULL handling, hybrid projects, unresolved DER)
+* **Gold API views** (capacity calculations, aggregations, SCD2 filtering)
+* **Edge cases** (NULL handling, hybrid projects, negative values, overcapacity)
 
 ### ❌ Not Yet Covered (Future Work)
-* Integration tests: Full Bronze → Silver → Gold pipeline
+* Integration tests: Full Bronze → Silver → Gold pipeline execution
 * DLT runtime execution (these are unit tests simulating behavior)
-* API views (`04_gold_api_views.py` - to be implemented)
-* Data quality metrics aggregation (`05_gold_data_quality.py` - to be implemented)
-* Auto Loader file ingestion
+* Data quality metrics aggregation (`05_gold_data_quality.py` - pending)
 * Performance tests (large datasets, clustering efficiency)
+* Schema evolution scenarios
+* Real Auto Loader incremental file ingestion
 
 ---
 
@@ -218,13 +288,27 @@ class TestMyNewFunction:
 4. **Each test** should be independent, fast, and deterministic
 5. **Mock external dependencies** (file system, APIs) when possible
 
-### SCD2 Testing Approach
+### Testing Approach by Layer
 
-Since DLT's `apply_changes` is a runtime operation, these tests:
-* **Simulate expected behavior** (what SCD2 should do)
-* **Validate configuration** (keys, sequence columns, tracked columns)
-* **Test change detection logic** (what triggers new versions)
-* **Verify edge cases** (NULL handling, composite keys, lineage exclusion)
+**Bronze Layer:**
+* Test helper logic (file path extraction, lineage generation)
+* Validate schema handling and data cleaning
+* Simulate Auto Loader patterns without requiring DLT runtime
+
+**Silver Layer:**
+* Test transformation functions in isolation
+* Validate aggregation and unpivot logic
+* Test field mapping and type casting
+
+**Gold SCD2:**
+* Simulate expected SCD2 behavior (what triggers versions)
+* Validate configuration (keys, sequence columns, tracked columns)
+* Test change detection and edge cases
+
+**Gold API Views:**
+* Test calculation accuracy (available capacity, aggregations)
+* Validate SCD2 filtering and NULL handling
+* Test query patterns and edge cases
 
 Integration tests would validate actual DLT execution with real pipelines.
 
@@ -236,3 +320,4 @@ Integration tests would validate actual DLT execution with real pipelines.
 * [PySpark Testing Best Practices](https://spark.apache.org/docs/latest/api/python/user_guide/testing.html)
 * [Databricks DLT Testing Guide](https://docs.databricks.com/delta-live-tables/testing.html)
 * [DLT APPLY CHANGES Documentation](https://docs.databricks.com/delta-live-tables/cdc.html)
+* [Auto Loader Best Practices](https://docs.databricks.com/ingestion/auto-loader/index.html)

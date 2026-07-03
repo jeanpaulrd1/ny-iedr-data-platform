@@ -88,28 +88,6 @@ def add_lineage_columns(
     return df.withColumns(columns)
 
 
-def compute_record_hash(df: DataFrame, key_columns: list) -> DataFrame:
-    """Compute a hash of record content for SCD detection.
-    
-    Creates a record_hash column by hashing the concatenation of key columns.
-    Used in Gold layer SCD Type 2 to detect content changes.
-    Uses SHA-256 as specified in architecture.
-    
-    Args:
-        df: Input DataFrame
-        key_columns: List of column names to include in hash
-        
-    Returns:
-        DataFrame with added record_hash column (SHA-256 hash)
-        
-    Example:
-        >>> df = compute_record_hash(df, ['feeder_id', 'max_hosting_capacity_mw'])
-    """
-    # Concatenate key columns into a single string
-    concat_expr = F.concat_ws("|", *[F.coalesce(F.col(c).cast("string"), F.lit("")) for c in key_columns])
-    
-    # Use SHA-256 as specified in architecture (not MD5)
-    return df.withColumn("record_hash", F.sha2(concat_expr, 256))
 
 
 def normalize_null_sentinels(df: DataFrame, columns: Optional[List[str]] = None) -> DataFrame:

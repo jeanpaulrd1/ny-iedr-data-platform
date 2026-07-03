@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pipelines.utils.helpers import (
     add_lineage_columns,
-    compute_record_hash,
     normalize_null_sentinels,
     strip_utf8_bom
 )
@@ -115,78 +114,6 @@ class TestNormalizeNullSentinels:
         assert rows[1].col2 == "valid"
         assert rows[2].col1 is None
         assert rows[2].col2 == "123"
-
-
-class TestComputeRecordHash:
-    """Tests for compute_record_hash function."""
-    
-    def test_creates_record_hash_column(self, spark):
-        """Test that record_hash column is created."""
-        df = spark.createDataFrame([
-            ("feeder1", "10.5"),
-        ], ["feeder_id", "capacity"])
-        
-        result = compute_record_hash(df, ["feeder_id", "capacity"])
-        
-        assert "record_hash" in result.columns
-        assert result.count() == 1
-    
-    def test_hash_is_sha256(self, spark):
-        """Test that hash is SHA-256 (64 character hex string)."""
-        df = spark.createDataFrame([
-            ("feeder1", "10.5"),
-        ], ["feeder_id", "capacity"])
-        
-        result = compute_record_hash(df, ["feeder_id", "capacity"])
-        hash_value = result.collect()[0].record_hash
-        
-        # SHA-256 produces 64 character hex string
-        assert len(hash_value) == 64
-        assert all(c in "0123456789abcdef" for c in hash_value)
-    
-    def test_hash_is_deterministic(self, spark):
-        """Test that same input produces same hash."""
-        df1 = spark.createDataFrame([
-            ("feeder1", "10.5"),
-        ], ["feeder_id", "capacity"])
-        
-        df2 = spark.createDataFrame([
-            ("feeder1", "10.5"),
-        ], ["feeder_id", "capacity"])
-        
-        result1 = compute_record_hash(df1, ["feeder_id", "capacity"])
-        result2 = compute_record_hash(df2, ["feeder_id", "capacity"])
-        
-        hash1 = result1.collect()[0].record_hash
-        hash2 = result2.collect()[0].record_hash
-        
-        assert hash1 == hash2
-    
-    def test_different_values_produce_different_hashes(self, spark):
-        """Test that different inputs produce different hashes."""
-        df = spark.createDataFrame([
-            ("feeder1", "10.5"),
-            ("feeder2", "20.0"),
-        ], ["feeder_id", "capacity"])
-        
-        result = compute_record_hash(df, ["feeder_id", "capacity"])
-        hashes = [row.record_hash for row in result.collect()]
-        
-        assert hashes[0] != hashes[1]
-    
-    def test_handles_null_values(self, spark):
-        """Test that NULL values in key columns are handled."""
-        df = spark.createDataFrame([
-            ("feeder1", None),
-            (None, "10.5"),
-        ], ["feeder_id", "capacity"])
-        
-        result = compute_record_hash(df, ["feeder_id", "capacity"])
-        
-        # Should not fail, should produce hashes
-        assert result.count() == 2
-        hashes = [row.record_hash for row in result.collect()]
-        assert all(len(h) == 64 for h in hashes)
 
 
 class TestAddLineageColumns:
