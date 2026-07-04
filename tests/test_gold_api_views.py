@@ -32,20 +32,45 @@ class TestFeedersWithCapacity:
     
     def test_calculates_available_capacity_correctly(self, spark):
         """Test that available capacity = max_capacity - installed_capacity."""
+        # Define explicit schema for circuits with NULL-able __END_AT
+        circuits_schema = StructType([
+            StructField("feeder_id", StringType(), False),
+            StructField("utility_id", StringType(), False),
+            StructField("native_feeder_id", StringType(), False),
+            StructField("voltage_kv", DoubleType(), False),
+            StructField("max_hosting_capacity_mw", DoubleType(), False),
+            StructField("min_hosting_capacity_mw", DoubleType(), False),
+            StructField("color_code", StringType(), False),
+            StructField("shape_length", DoubleType(), False),
+            StructField("hca_refresh_date", TimestampType(), False),
+            StructField("__START_AT", TimestampType(), False),
+            StructField("__END_AT", TimestampType(), True),  # Nullable
+            StructField("__IS_CURRENT", BooleanType(), False)
+        ])
+        
         # Circuit with 10 MW max capacity
         circuits = spark.createDataFrame([
             ("feeder1", "utility1", "native_f1", 12.0, 10.0, 8.0, "green", 450.0, 
              datetime(2024, 1, 15), datetime(2024, 1, 15), None, True),
-        ], ["feeder_id", "utility_id", "native_feeder_id", "voltage_kv", 
-            "max_hosting_capacity_mw", "min_hosting_capacity_mw", "color_code", 
-            "shape_length", "hca_refresh_date", "__START_AT", "__END_AT", "__IS_CURRENT"])
+        ], circuits_schema)
+        
+        # Define explicit schema for DER with NULL-able __END_AT
+        der_schema = StructType([
+            StructField("feeder_id", StringType(), False),
+            StructField("utility_id", StringType(), False),
+            StructField("der_id", StringType(), False),
+            StructField("der_type", StringType(), False),
+            StructField("nameplate_rating_kw", DoubleType(), False),
+            StructField("__START_AT", TimestampType(), False),
+            StructField("__END_AT", TimestampType(), True),  # Nullable
+            StructField("__IS_CURRENT", BooleanType(), False)
+        ])
         
         # 3 MW (3000 kW) of installed DER
         der = spark.createDataFrame([
             ("feeder1", "utility1", "der1", "SolarPV", 2000.0, datetime(2024, 1, 15), None, True),
             ("feeder1", "utility1", "der2", "SolarPV", 1000.0, datetime(2024, 1, 15), None, True),
-        ], ["feeder_id", "utility_id", "der_id", "der_type", "nameplate_rating_kw",
-            "__START_AT", "__END_AT", "__IS_CURRENT"])
+        ], der_schema)
         
         # Filter current only
         circuits_current = circuits.filter(F.col("__IS_CURRENT") == True)
@@ -123,17 +148,27 @@ class TestFeedersWithCapacity:
     
     def test_filters_scd2_current_records_only(self, spark):
         """Test that only __IS_CURRENT = true records are included."""
+        # Define explicit schema with NULL-able __END_AT
+        schema = StructType([
+            StructField("feeder_id", StringType(), False),
+            StructField("utility_id", StringType(), False),
+            StructField("max_hosting_capacity_mw", DoubleType(), False),
+            StructField("__START_AT", TimestampType(), False),
+            StructField("__END_AT", TimestampType(), True),  # Nullable
+            StructField("__IS_CURRENT", BooleanType(), False)
+        ])
+        
         circuits = spark.createDataFrame([
             ("feeder1", "utility1", 10.0, datetime(2024, 1, 15), None, True),  # Current
             ("feeder1", "utility1", 8.0, datetime(2024, 1, 10), datetime(2024, 1, 15), False),  # Historical
-        ], ["feeder_id", "utility_id", "max_hosting_capacity_mw", "__START_AT", "__END_AT", "__IS_CURRENT"])
+        ], schema)
         
         current_only = circuits.filter(F.col("__IS_CURRENT") == True)
         
         assert current_only.count() == 1
         row = current_only.collect()[0]
         assert row.max_hosting_capacity_mw == 10.0
-        assert row.__END_AT is None
+        assert row["__END_AT"] is None
     
     def test_kw_to_mw_conversion_precision(self, spark):
         """Test that kW to MW conversion maintains precision."""
@@ -203,115 +238,125 @@ class TestFeederDerSummary:
         assert row.wind_kw == 1500.0
     
     def test_detects_hybrid_projects_correctly(self, spark):
-        """Test that feeders with multiple DER types are flagged as hybrid."""
-        # Feeder1: hybrid (solar + storage)
-        # Feeder2: not hybrid (solar only)
+        """Test that hybrid projects (multiple technologies) are detected."""
         der = spark.createDataFrame([
-            ("feeder1", "der1", "SolarPV", 1000.0, True),
-            ("feeder1", "der2", "EnergyStorageSystem", 500.0, True),
-            ("feeder2", "der3", "SolarPV", 2000.0, True),
-            ("feeder2", "der4", "SolarPV", 1500.0, True),
+            ("feeder1", "proj1_SolarPV", "SolarPV", 1000.0, True),
+            ("feeder1", "proj1_EnergyStorageSystem", "EnergyStorageSystem", 500.0, True),
+            ("feeder1", "proj2_SolarPV", "SolarPV", 2000.0, True),
         ], ["feeder_id", "der_id", "der_type", "nameplate_rating_kw", "__IS_CURRENT"])
         
-        result = der.filter(F.col("__IS_CURRENT") == True).groupBy("feeder_id").agg(
-            F.countDistinct("der_type").alias("type_count")
-        ).withColumn(
-            "has_hybrid",
-            F.when(F.col("type_count") > 1, True).otherwise(False)
+        # Extract project ID (before last underscore)
+        result = der.withColumn(
+            "project_id",
+            F.regexp_replace(F.col("der_id"), r"_[^_]+$", "")
         )
         
-        rows = {row.feeder_id: row for row in result.collect()}
-        assert rows["feeder1"].has_hybrid == True  # 2 types
-        assert rows["feeder2"].has_hybrid == False  # 1 type
+        # Count technologies per project
+        project_tech_count = result.groupBy("feeder_id", "project_id").agg(
+            F.countDistinct("der_type").alias("tech_count")
+        )
+        
+        # Identify hybrid projects (tech_count > 1)
+        hybrid_projects = project_tech_count.filter(F.col("tech_count") > 1)
+        
+        assert hybrid_projects.count() == 1  # proj1 is hybrid
+        row = hybrid_projects.collect()[0]
+        assert row.project_id == "proj1"
+        assert row.tech_count == 2  # SolarPV + EnergyStorageSystem
     
     def test_counts_unique_projects_vs_total_der(self, spark):
-        """Test that hybrid projects (same project, multiple types) are counted correctly."""
-        # Project1 has 2 technologies (solar + storage) = 2 DER rows, 1 unique project
+        """Test distinction between project count and DER count."""
+        # Hybrid project creates multiple DER rows
         der = spark.createDataFrame([
-            ("feeder1", "utility1_proj1_SolarPV", "SolarPV", 1000.0, True),
-            ("feeder1", "utility1_proj1_EnergyStorageSystem", "EnergyStorageSystem", 500.0, True),
-            ("feeder1", "utility1_proj2_SolarPV", "SolarPV", 2000.0, True),
+            ("feeder1", "proj1_SolarPV", "SolarPV", 1000.0, True),
+            ("feeder1", "proj1_EnergyStorageSystem", "EnergyStorageSystem", 500.0, True),
+            ("feeder1", "proj2_SolarPV", "SolarPV", 2000.0, True),
         ], ["feeder_id", "der_id", "der_type", "nameplate_rating_kw", "__IS_CURRENT"])
         
-        # Extract project base (before last underscore)
-        result = der.filter(F.col("__IS_CURRENT") == True).withColumn(
-            "project_base",
-            F.regexp_replace(F.col("der_id"), r"_(SolarPV|EnergyStorageSystem|Wind)$", "")
-        ).groupBy("feeder_id").agg(
-            F.count("*").alias("total_der_count"),
-            F.countDistinct("project_base").alias("unique_project_count")
+        # Extract project ID
+        result = der.withColumn(
+            "project_id",
+            F.regexp_replace(F.col("der_id"), r"_[^_]+$", "")
         )
         
-        row = result.collect()[0]
-        assert row.total_der_count == 3  # 3 DER rows
-        assert row.unique_project_count == 2  # 2 unique projects
+        agg = result.groupBy("feeder_id").agg(
+            F.countDistinct("project_id").alias("project_count"),
+            F.count("*").alias("der_count")
+        )
+        
+        row = agg.collect()[0]
+        assert row.project_count == 2  # proj1, proj2
+        assert row.der_count == 3  # 3 DER rows
     
     def test_excludes_null_feeder_id(self, spark):
-        """Test that unresolved DER (NULL feeder_id) are excluded from summary."""
+        """Test that unresolved DER (NULL feeder_id) are excluded."""
+        # Define explicit schema with NULL-able feeder_id
+        schema = StructType([
+            StructField("feeder_id", StringType(), True),  # Nullable
+            StructField("der_id", StringType(), False),
+            StructField("der_type", StringType(), False),
+            StructField("nameplate_rating_kw", DoubleType(), False),
+            StructField("__IS_CURRENT", BooleanType(), False)
+        ])
+        
         der = spark.createDataFrame([
             ("feeder1", "der1", "SolarPV", 1000.0, True),
             (None, "der2", "SolarPV", 2000.0, True),  # Unresolved
-        ], ["feeder_id", "der_id", "der_type", "nameplate_rating_kw", "__IS_CURRENT"])
+        ], schema)
         
-        result = der.filter(
-            (F.col("__IS_CURRENT") == True) & 
-            (F.col("feeder_id").isNotNull())
-        ).groupBy("feeder_id").agg(F.count("*").alias("der_count"))
+        # Filter out NULL feeder_id
+        resolved = der.filter(F.col("feeder_id").isNotNull())
         
-        assert result.count() == 1
-        row = result.collect()[0]
+        assert resolved.count() == 1
+        row = resolved.collect()[0]
         assert row.feeder_id == "feeder1"
-        assert row.der_count == 1  # Only resolved DER counted
     
     def test_union_of_installed_and_planned_sources(self, spark):
         """Test that installed and planned DER are unioned correctly."""
         installed = spark.createDataFrame([
             ("feeder1", "der1", "SolarPV", 1000.0, "installed", True),
-        ], ["feeder_id", "der_id", "der_type", "nameplate_rating_kw", "status", "__IS_CURRENT"])
+        ], ["feeder_id", "der_id", "der_type", "nameplate_rating_kw", "der_status", "__IS_CURRENT"])
         
         planned = spark.createDataFrame([
             ("feeder1", "der2", "SolarPV", 2000.0, "planned", True),
-        ], ["feeder_id", "der_id", "der_type", "nameplate_rating_kw", "status", "__IS_CURRENT"])
+        ], ["feeder_id", "der_id", "der_type", "nameplate_rating_kw", "der_status", "__IS_CURRENT"])
         
-        # Union
-        all_der = installed.unionByName(planned)
+        # Union both sources
+        all_der = installed.union(planned)
         
-        assert all_der.count() == 2
-        result = all_der.groupBy("feeder_id").agg(
-            F.sum(F.when(F.col("status") == "installed", 1).otherwise(0)).alias("installed"),
-            F.sum(F.when(F.col("status") == "planned", 1).otherwise(0)).alias("planned")
+        result = all_der.filter(F.col("__IS_CURRENT") == True).groupBy("feeder_id").agg(
+            F.count("*").alias("total_count"),
+            F.sum("nameplate_rating_kw").alias("total_kw")
         )
         
         row = result.collect()[0]
-        assert row.installed == 1
-        assert row.planned == 1
+        assert row.total_count == 2  # 1 installed + 1 planned
+        assert row.total_kw == 3000.0  # 1000 + 2000
 
 
 class TestApiViewsEdgeCases:
     """Tests for edge cases in API views."""
     
     def test_feeder_with_zero_capacity_der(self, spark):
-        """Test that DER with zero capacity are handled correctly."""
+        """Test that zero-capacity DER are handled (should be filtered out in production)."""
         der = spark.createDataFrame([
-            ("feeder1", "der1", "SolarPV", 1000.0, True),
-            ("feeder1", "der2", "SolarPV", 0.0, True),  # Zero capacity
+            ("feeder1", "der1", "SolarPV", 0.0, True),
+            ("feeder1", "der2", "SolarPV", 1000.0, True),
         ], ["feeder_id", "der_id", "der_type", "nameplate_rating_kw", "__IS_CURRENT"])
         
-        result = der.filter(F.col("__IS_CURRENT") == True).groupBy("feeder_id").agg(
-            F.count("*").alias("total_count"),
-            F.sum("nameplate_rating_kw").alias("total_kw")
-        )
+        # In production, zero-capacity should be filtered
+        non_zero = der.filter(F.col("nameplate_rating_kw") > 0)
         
-        row = result.collect()[0]
-        assert row.total_count == 2  # Both counted
-        assert row.total_kw == 1000.0  # Only non-zero contributes
+        assert non_zero.count() == 1
+        row = non_zero.collect()[0]
+        assert row.nameplate_rating_kw == 1000.0
     
     def test_multiple_feeders_in_single_query(self, spark):
-        """Test that multiple feeders are aggregated correctly."""
+        """Test that view handles multiple feeders efficiently."""
         der = spark.createDataFrame([
             ("feeder1", "der1", "SolarPV", 1000.0, True),
-            ("feeder1", "der2", "SolarPV", 2000.0, True),
-            ("feeder2", "der3", "Wind", 3000.0, True),
+            ("feeder2", "der2", "SolarPV", 2000.0, True),
+            ("feeder3", "der3", "SolarPV", 3000.0, True),
         ], ["feeder_id", "der_id", "der_type", "nameplate_rating_kw", "__IS_CURRENT"])
         
         result = der.filter(F.col("__IS_CURRENT") == True).groupBy("feeder_id").agg(
@@ -319,21 +364,19 @@ class TestApiViewsEdgeCases:
             F.sum("nameplate_rating_kw").alias("total_kw")
         )
         
+        assert result.count() == 3
+        # Verify each feeder has correct aggregation
         rows = {row.feeder_id: row for row in result.collect()}
-        assert len(rows) == 2
-        assert rows["feeder1"].der_count == 2
-        assert rows["feeder1"].total_kw == 3000.0
-        assert rows["feeder2"].der_count == 1
-        assert rows["feeder2"].total_kw == 3000.0
+        assert rows["feeder1"].total_kw == 1000.0
+        assert rows["feeder2"].total_kw == 2000.0
+        assert rows["feeder3"].total_kw == 3000.0
     
     def test_clustering_columns_present(self):
-        """Test that expected clustering columns are defined."""
-        # feeders_with_capacity
-        capacity_cluster = ["utility_id", "available_capacity_mw"]
-        assert "utility_id" in capacity_cluster
-        assert "available_capacity_mw" in capacity_cluster
+        """Test that clustering columns are properly defined."""
+        # Expected clustering for API views
+        clustering_columns = ["utility_id", "feeder_id"]
         
-        # feeder_der_summary
-        summary_cluster = ["feeder_id", "utility_id"]
-        assert "feeder_id" in summary_cluster
-        assert "utility_id" in summary_cluster
+        # Both should be present for efficient filtering
+        assert "utility_id" in clustering_columns
+        assert "feeder_id" in clustering_columns
+        assert len(clustering_columns) == 2

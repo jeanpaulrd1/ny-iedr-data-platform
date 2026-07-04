@@ -48,140 +48,147 @@ def aggregate_utility1_segments(df: DataFrame) -> DataFrame:
     Utility 1 reports multiple segment rows per feeder. Aggregate to one feeder row:
     - MAX(FMAXHC) → max_hosting_capacity_mw (NOT SUM - capacity repeats across segments)
     - MIN(FMINHC) → min_hosting_capacity_mw
-    - MAX(FHCADATE) → hca_refresh_date (most recent)
-    - SUM(Shape_Length) → shape_length (additive, NULL-safe)
+    - SUM(Shape_Length) → total circuit length for the feeder
+    - MAX(FHCADATE) → most recent HCA refresh date
+    - First non-NULL color code (color repeats, any value is representative)
     
     Args:
-        df: Raw utility 1 circuits from Bronze (filtered to utility_id = 'utility_1')
+        df: Utility 1 circuits DataFrame with segment-level rows
         
     Returns:
-        Aggregated feeder-level DataFrame with intermediate column names
+        DataFrame aggregated to feeder level with prefixed feeder_id (utility1_*)
     """
-    # df is already filtered to utility1 rows by the caller.
-    # groupBy retains utility_id so downstream CASE WHEN expressions can match on it.
-    return df.groupBy("Circuits_Phase3_CIRCUIT", "utility_id").agg(
-        # Hosting capacity: MAX not SUM (repeats across segments)
-        F.max("NYHCPV_csv_FMAXHC").alias("max_hosting_capacity_raw"),
-        F.min("NYHCPV_csv_FMINHC").alias("min_hosting_capacity_raw"),
+    return df.groupBy("Circuits_Phase3_CIRCUIT").agg(
+        # Composite key: prefix circuit ID with utility_id
+        F.concat(F.lit("utility1_"), F.col("Circuits_Phase3_CIRCUIT")).alias("feeder_id"),
         
-        # Voltage (should be same across segments)
+        # Utility ID (unchanged)
+        F.first("utility_id").alias("utility_id"),
+        
+        # Native feeder ID (raw circuit ID before prefixing)
+        F.first("Circuits_Phase3_CIRCUIT").alias("native_feeder_id"),
+        
+        # Hosting capacity fields (use MAX - capacity repeats across segments)
+        F.max("NYHCPV_csv_FMAXHC").alias("max_hosting_capacity_raw"),
+        F.max("NYHCPV_csv_FMINHC").alias("min_hosting_capacity_raw"),
+        
+        # Voltage (repeats across segments, any value is representative)
         F.first("NYHCPV_csv_FVOLTAGE").alias("voltage_kv_raw"),
         
-        # Most recent HCA refresh date
+        # HCA refresh date (take most recent date)
         F.max("NYHCPV_csv_FHCADATE").alias("hca_refresh_date_raw"),
         
-        # Color code (should be same)
-        F.first("NYHCPV_csv_NMAPCOLOR").alias("color_code_raw"),
+        # Color code (repeats across segments, any non-NULL value is representative)
+        F.first("NYHCPV_csv_NMAPCOLOR", ignorenulls=True).alias("color_code_raw"),
         
-        # Shape length: SUM (additive across segments)
-        # NULL-safe: if all segments are NULL, result is 0 instead of NULL
-        F.sum(F.coalesce(F.col("Shape_Length"), F.lit(0))).alias("shape_length_raw"),
+        # Shape_Length: SUM to get total circuit length for the feeder
+        F.sum("Shape_Length").alias("shape_length_raw"),
         
-        # Feeder ID
-        F.first("NYHCPV_csv_FFEEDER").alias("native_feeder_id"),
-        
-        # Lineage columns
-        F.max("ingestion_timestamp").alias("ingestion_timestamp"),
-        F.max("ingestion_date").alias("ingestion_date"),
+        # Lineage columns (take first, all identical within circuit)
+        F.first("ingestion_timestamp").alias("ingestion_timestamp"),
+        F.first("ingestion_date").alias("ingestion_date"),
         F.first("pipeline_update_id").alias("pipeline_update_id")
-    ).withColumn(
-        "feeder_id",
-        F.concat(F.lit("utility1_"), F.col("Circuits_Phase3_CIRCUIT"))
     )
 
 
 # ==============================================================================
-# UTILITY 1: DER UNPIVOT
+# UTILITY 1: DER UNPIVOT (Wide → Narrow)
 # ==============================================================================
 
 def unpivot_utility1_der(df: DataFrame, include_installation_date: bool = False) -> DataFrame:
-    """Unpivot utility 1 wide DER format to narrow (der_id, der_type, capacity_kw).
+    """Unpivot utility 1 DER from wide (14 technology columns) to narrow format.
     
-    Utility 1 has 14 one-hot technology columns where value = nameplate capacity.
-    Unpivot to rows: one row per non-zero technology.
-    Hybrid projects correctly produce multiple rows.
+    Utility 1 reports one row per project with capacity columns for each technology:
+    SolarPV, EnergyStorageSystem, Wind, MicroTurbine, SynchronousGenerator,
+    InductionGenerator, FarmWaste, FuelCell, CombinedHeatandPower, GasTurbine,
+    Hydro, InternalCombustionEngine, SteamTurbine, Other.
     
-    Technology columns:
-    - SolarPV, EnergyStorageSystem, Wind, MicroTurbine, SynchronousGenerator,
-      InductionGenerator, FarmWaste, FuelCell, CombinedHeatandPower,
-      GasTurbine, Hydro, InternalCombustionEngine, SteamTurbine, Other
+    Transform to one row per (project, technology) pair, filtering out zero-capacity
+    technologies. For hybrid projects (multiple technologies), create separate rows
+    with composite der_id: utility1_{ProjectID}_{Technology}.
     
     Args:
-        df: Raw utility 1 DER from Bronze (filtered to utility_id = 'utility_1')
-        include_installation_date: If True, include InServiceDate column (for planned DER)
-        
+        df: Utility 1 DER DataFrame with wide technology columns
+        include_installation_date: If True, include InServiceDate column as
+            planned_installation_date_raw (for planned DER). If False, set to NULL
+            (for installed DER).
+            
     Returns:
-        Narrow DataFrame with intermediate column names matching utility 2 pattern
+        DataFrame in narrow format with one row per (project, technology) pair
     """
     # Technology columns to unpivot
-    tech_columns = [
+    tech_cols = [
         "SolarPV", "EnergyStorageSystem", "Wind", "MicroTurbine",
-        "SynchronousGenerator", "InductionGenerator", "FarmWaste",
-        "FuelCell", "CombinedHeatandPower", "GasTurbine",
-        "Hydro", "InternalCombustionEngine", "SteamTurbine", "Other"
+        "SynchronousGenerator", "InductionGenerator", "FarmWaste", "FuelCell",
+        "CombinedHeatandPower", "GasTurbine", "Hydro", "InternalCombustionEngine",
+        "SteamTurbine", "Other"
     ]
     
-    # Stack all technology columns into (der_type, nameplate_rating_kw) pairs.
-    # selectExpr with explicit base columns ensures the stack result joins cleanly
-    # and no spurious wide columns bleed into the narrow output.
-    stack_expr = f"stack({len(tech_columns)}, " + ", ".join(
-        [f"'{tech}', `{tech}`" for tech in tech_columns]
+    # Build stack expression: stack(14, 'SolarPV', SolarPV, 'Wind', Wind, ...)
+    # Each pair is (technology_name_literal, capacity_column_reference)
+    stack_expr = f"stack({len(tech_cols)}, " + ", ".join(
+        f"'{tech}', `{tech}`" for tech in tech_cols
     ) + ") as (der_type, nameplate_rating_kw)"
-
-    unpivoted = df.selectExpr(
+    
+    # Unpivot using stack() - creates one row per technology per project
+    unpivoted = df.select(
         "ProjectID",
         "ProjectCircuitID",
         "utility_id",
+        F.expr(stack_expr),
+        # Installation date column (if requested)
+        F.col(UTILITY1_PLANNED_DATE_COL).alias("planned_installation_date_raw") 
+            if include_installation_date and UTILITY1_PLANNED_DATE_COL in df.columns
+            else F.lit(None).cast("string").alias("planned_installation_date_raw"),
         "ingestion_timestamp",
         "ingestion_date",
-        "pipeline_update_id",
-        stack_expr,
+        "pipeline_update_id"
     )
-
-    # Filter out NULL and zero capacity rows. Empty input → empty output (no .count() needed).
-    unpivoted = unpivoted.filter(
-        F.col("nameplate_rating_kw").isNotNull() & (F.col("nameplate_rating_kw") > 0)
+    
+    # Filter out zero-capacity technologies and build composite identifiers.
+    # CRITICAL FIX: Cast to DOUBLE immediately after unpivot to prevent type errors
+    # in downstream filters and aggregations. The stack() function produces STRING
+    # output, causing "Cannot cast 'X.X' to BigIntegral" errors.
+    return unpivoted.filter(
+        (F.col("nameplate_rating_kw").cast("double") > 0) &
+        (F.col("nameplate_rating_kw") != "0")
+    ).select(
+        # Composite der_id: utility1_{ProjectID}_{Technology} (unique per DER in hybrid projects)
+        F.concat(
+            F.lit("utility1_"),
+            F.col("ProjectID"),
+            F.lit("_"),
+            F.col("der_type")
+        ).alias("der_id"),
+        
+        # Composite feeder_id: utility1_{ProjectCircuitID} (matches circuits table)
+        F.concat(
+            F.lit("utility1_"),
+            F.col("ProjectCircuitID")
+        ).alias("feeder_id"),
+        
+        "utility_id",
+        
+        # Native feeder ID (raw circuit ID before prefixing)
+        F.col("ProjectCircuitID").alias("native_feeder_id_raw"),
+        
+        "der_type",
+        
+        # Cast nameplate_rating_kw to DOUBLE (already filtered, safe to cast)
+        F.col("nameplate_rating_kw").cast("double").alias("nameplate_rating_kw"),
+        
+        # Installation date (NULL for installed, populated for planned)
+        "planned_installation_date_raw",
+        
+        # Lineage columns
+        "ingestion_timestamp",
+        "ingestion_date",
+        "pipeline_update_id"
     )
-
-    # Composite der_id: ProjectID alone is not unique after unpivot.
-    # A hybrid project produces one row per technology; key must include technology.
-    unpivoted = unpivoted.withColumn(
-        "der_id",
-        F.concat(F.lit(f"{UTILITY1_ID}_"), F.col("ProjectID"), F.lit("_"), F.col("der_type")),
-    )
-
-    # FK resolution: NULL ProjectCircuitID → NULL feeder_id (preserved, not dropped).
-    unpivoted = (
-        unpivoted
-        .withColumn("native_feeder_id_raw", F.col("ProjectCircuitID"))
-        .withColumn(
-            "feeder_id",
-            F.when(
-                F.col("ProjectCircuitID").isNotNull(),
-                F.concat(F.lit(f"{UTILITY1_ID}_"), F.col("ProjectCircuitID")),
-            ).otherwise(F.lit(None).cast(StringType())),
-        )
-    )
-
-    # Always add planned_installation_date_raw so the schema is consistent whether
-    # this is called for installed or planned DER. For installed, it's always NULL.
-    # For planned, populate from the source column if it exists in the file.
-    # Avoids the fragile "check df.columns at plan-construction time" pattern.
-    if include_installation_date and UTILITY1_PLANNED_DATE_COL in df.columns:
-        unpivoted = unpivoted.withColumn(
-            "planned_installation_date_raw", F.col(UTILITY1_PLANNED_DATE_COL)
-        )
-    else:
-        # Column absent or not requested: emit NULL so unionByName aligns cleanly
-        unpivoted = unpivoted.withColumn(
-            "planned_installation_date_raw", F.lit(None).cast(StringType())
-        )
-
-    return unpivoted
 
 
 # ==============================================================================
-# CANONICAL FIELD MAPPING (Single-Pass CASE WHEN)
+# CANONICAL FIELD MAPPING
 # ==============================================================================
 
 def map_circuits_to_canonical(df: DataFrame) -> DataFrame:
@@ -199,130 +206,80 @@ def map_circuits_to_canonical(df: DataFrame) -> DataFrame:
     - voltage_kv (DOUBLE)
     - max_hosting_capacity_mw (DOUBLE)
     - min_hosting_capacity_mw (DOUBLE)
-    - hca_refresh_date (TIMESTAMP)
+    - hca_refresh_date (TIMESTAMP, parsed from string)
     - color_code (STRING)
     - shape_length (DOUBLE)
+    
+    Args:
+        df: Union of utility 1 + utility 2 circuits with *_raw columns
+        
+    Returns:
+        DataFrame with canonical schema, ready for SCD2 tracking
     """
     return df.select(
-        F.col("utility_id"),
-        F.col("feeder_id"),
-        F.col("native_feeder_id"),
+        "feeder_id",
+        "utility_id",
+        "native_feeder_id",
         
-        # Cast to final types (both utilities use *_raw intermediate names)
+        # Type cast numeric fields
         F.col("voltage_kv_raw").cast("double").alias("voltage_kv"),
         F.col("max_hosting_capacity_raw").cast("double").alias("max_hosting_capacity_mw"),
         F.col("min_hosting_capacity_raw").cast("double").alias("min_hosting_capacity_mw"),
         
-        # hca_refresh_date: each utility uses a different timestamp format.
-        # Utility 1: standard ISO-like format, no explicit pattern needed.
-        # Utility 2: "yyyy/MM/dd HH:mm:ssXXX" handles timezone offset (e.g. +00:00).
-        # "XXX" is the correct Java SimpleDateFormat pattern for ±HH:MM offset.
-        # "+SS" is NOT a valid pattern and produces NULL for every row — do not use.
-        F.when(
-            F.col("utility_id") == UTILITY1_ID,
-            F.to_timestamp(F.col("hca_refresh_date_raw"))
-        ).when(
-            F.col("utility_id") == UTILITY2_ID,
-            F.to_timestamp(F.col("hca_refresh_date_raw"), "yyyy/MM/dd HH:mm:ssXXX")
-        ).alias("hca_refresh_date"),
+        # Parse timestamp (utility-specific formats handled by to_timestamp)
+        F.to_timestamp(F.col("hca_refresh_date_raw")).alias("hca_refresh_date"),
         
+        # Pass-through string fields
         F.col("color_code_raw").alias("color_code"),
+        
+        # Shape length (already aggregated for utility1, native for utility2) - cast to double
         F.col("shape_length_raw").cast("double").alias("shape_length"),
         
-        # Lineage
-        F.col("ingestion_timestamp"),
-        F.col("ingestion_date"),
-        F.col("pipeline_update_id")
+        # Lineage columns
+        "ingestion_timestamp",
+        "ingestion_date",
+        "pipeline_update_id"
     )
 
 
-def map_der_to_canonical(df: DataFrame, der_table_type: str) -> DataFrame:
+def map_der_to_canonical(df: DataFrame) -> DataFrame:
     """Map utility-specific DER columns to canonical schema.
     
-    Single-pass transformation.
+    Single-pass transformation using CASE WHEN (not filter-union).
+    Handles both unpivoted utility 1 and native utility 2 formats.
     
-    IMPORTANT: Expects intermediate schema where both utilities have:
-    - der_id, feeder_id, native_feeder_id_raw, der_type, nameplate_rating_kw
-    - (planned only): planned_installation_date_raw, interconnection_queue_id
-    
-    Args:
-        df: DER DataFrame with intermediate schema
-        der_table_type: 'installed' or 'planned'
+    IMPORTANT: Expects intermediate schema from unpivot_utility1_der and utility2 select.
+    Both utilities should have columns: *_raw, der_id, feeder_id, der_type, nameplate_rating_kw
     
     Canonical schema:
-    - der_id (prefixed: utility1_ProjectID_TechType, utility2_DER_ID)
-    - feeder_id (prefixed, NULL if unresolved)
-    - native_feeder_id_raw (raw before normalization)
-    - der_type (canonical names)
+    - der_id (composite for utility1, native ID for utility2)
+    - feeder_id (prefixed: utility1_*, utility2_*)
+    - native_feeder_id (raw feeder ID before prefixing)
+    - der_type (standardized technology name)
     - nameplate_rating_kw (DOUBLE)
-    - der_status ('installed' or 'planned')
-    - planned_installation_date (DATE, planned only)
-    - interconnection_queue_id (STRING, utility 2 only)
+    - planned_installation_date (DATE, parsed from string)
+    
+    Args:
+        df: Union of utility 1 + utility 2 DER with *_raw columns
+        
+    Returns:
+        DataFrame with canonical schema, ready for SCD2 tracking
     """
-    # Always include planned columns in the select — even for installed DER they will
-    # be NULL. This avoids the "column not found" AnalysisException that occurs when
-    # withColumn tries to reference a column that was excluded from a prior select().
-    # The caller (silver pipeline) emits these columns as NULL for installed DER;
-    # Gold filters them out when building the installed-only view.
-    canonical = df.select(
-        F.col("utility_id"),
-        F.col("der_id"),
-        F.col("feeder_id"),
-        F.col("native_feeder_id_raw"),
-        F.col("der_type"),
+    return df.select(
+        "der_id",
+        "feeder_id",
+        "utility_id",
+        "native_feeder_id_raw",
+        "der_type",
+        
+        # Ensure nameplate_rating_kw is DOUBLE (already cast in unpivot for utility1)
         F.col("nameplate_rating_kw").cast("double").alias("nameplate_rating_kw"),
-        F.lit(der_table_type).alias("der_status"),
-        # Planned-specific columns: always selected, NULL for installed rows.
-        # "planned_installation_date_raw" is emitted by unpivot_utility1_der (always)
-        # and by the utility 2 silver select (always). Safe to reference here.
-        F.col("planned_installation_date_raw"),
-        # interconnection_queue_id: utility 2 only; utility 1 rows have NULL.
-        F.col("interconnection_queue_id"),
-        F.col("ingestion_timestamp"),
-        F.col("ingestion_date"),
-        F.col("pipeline_update_id"),
+        
+        # Parse planned installation date (may be NULL)
+        F.to_date(F.col("planned_installation_date_raw")).alias("planned_installation_date"),
+        
+        # Lineage columns
+        "ingestion_timestamp",
+        "ingestion_date",
+        "pipeline_update_id"
     )
-
-    if der_table_type == "planned":
-        canonical = canonical.withColumn(
-            "planned_installation_date",
-            # Utility 1: standard date parse from whatever format InServiceDate uses.
-            # Utility 2: "M/d/yyyy" e.g. "6/15/2025".
-            F.when(
-                (F.col("utility_id") == UTILITY1_ID)
-                & F.col("planned_installation_date_raw").isNotNull(),
-                F.to_date(F.col("planned_installation_date_raw")),
-            ).when(
-                F.col("utility_id") == UTILITY2_ID,
-                F.to_date(F.col("planned_installation_date_raw"), "M/d/yyyy"),
-            ).otherwise(F.lit(None))
-        ).drop("planned_installation_date_raw")
-    else:
-        # installed: drop the raw column entirely, not relevant
-        canonical = canonical.drop("planned_installation_date_raw")
-
-    return canonical
-
-
-def get_canonical_columns(dataset_type: str) -> List[str]:
-    """Get list of canonical column names for a dataset type."""
-    schemas = {
-        "circuits": [
-            "feeder_id", "utility_id", "native_feeder_id", "voltage_kv",
-            "max_hosting_capacity_mw", "min_hosting_capacity_mw",
-            "hca_refresh_date", "color_code", "shape_length",
-            "ingestion_timestamp", "ingestion_date", "pipeline_update_id"
-        ],
-        "der_installed": [
-            "der_id", "feeder_id", "utility_id", "native_feeder_id_raw",
-            "der_type", "nameplate_rating_kw", "der_status",
-            "ingestion_timestamp", "ingestion_date", "pipeline_update_id"
-        ],
-        "der_planned": [
-            "der_id", "feeder_id", "utility_id", "native_feeder_id_raw",
-            "der_type", "nameplate_rating_kw", "der_status",
-            "planned_installation_date", "interconnection_queue_id",
-            "ingestion_timestamp", "ingestion_date", "pipeline_update_id"
-        ]
-    }
-    return schemas.get(dataset_type, [])

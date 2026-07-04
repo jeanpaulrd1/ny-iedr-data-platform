@@ -1,20 +1,23 @@
-"""Helper utilities for NY IEDR data pipeline.
+"""Helper utilities for NY IEDR data platform.
 
-Provides lineage tracking, file hashing, and metadata injection functions
-for use across Bronze, Silver, and Gold layers.
+Contains reusable functions for:
+- Lineage column generation (ingestion timestamps, run IDs)
+- Data normalization (UTF-8 BOM, NULL sentinels)
+- Data quality expectation definitions
+
+These utilities are designed to work across Bronze, Silver, and Gold layers.
 """
-
-import uuid
-from datetime import datetime
-from typing import Optional, List
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+from typing import Optional, List
+from datetime import datetime
+import uuid
 
 
 def add_lineage_columns(
     df: DataFrame,
-    source_file_col: str = "_metadata.file_path",
+    source_file_col: Optional[str] = None,
     include_file_signature: bool = False
 ) -> DataFrame:
     """Add standard lineage columns to a DataFrame.
@@ -25,13 +28,14 @@ def add_lineage_columns(
     
     Args:
         df: Input DataFrame
-        source_file_col: Column containing source file path (for Bronze layer only)
+        source_file_col: Column containing source file path (for Bronze layer only).
+                        Defaults to None (Silver/Gold usage).
         include_file_signature: Whether to add file_signature column (Bronze layer only)
         
     Returns:
         DataFrame with added columns:
             - ingestion_timestamp: Record-level timestamp
-            - ingestion_date: Date partition key (Bronze only)
+            - ingestion_date: Date partition key
             - pipeline_update_id: Run identifier (format: run_YYYYMMDD_HHmmss_<hash>)
             - source_file: Source file path (if source_file_col provided)
             - utility_id: Extracted from file path (if source_file_col provided)
@@ -72,7 +76,8 @@ def add_lineage_columns(
         landing_index = F.array_position(path_parts, F.lit("landing"))
         columns["utility_id"] = F.when(
             landing_index > 0,
-            F.element_at(path_parts, landing_index + 1)
+            # Cast to int to match element_at signature (it expects INT not BIGINT)
+            F.element_at(path_parts, (landing_index + 1).cast("int"))
         ).otherwise(F.lit("unknown"))
         
         # Add file signature for Bronze layer idempotency
@@ -88,14 +93,12 @@ def add_lineage_columns(
     return df.withColumns(columns)
 
 
-
-
 def normalize_null_sentinels(df: DataFrame, columns: Optional[List[str]] = None) -> DataFrame:
     """Normalize string null sentinels to true SQL NULL.
     
     Converts common null-representing strings to true NULL values.
     Handles: 'NULL', 'null', 'N/A', 'n/a', 'NA', empty string, and whitespace-only strings.
-    Trims whitespace before checking.
+    Trims all whitespace (spaces, tabs, newlines, etc.) before checking.
     
     Args:
         df: Input DataFrame
@@ -128,11 +131,12 @@ def normalize_null_sentinels(df: DataFrame, columns: Optional[List[str]] = None)
     # Build all column transformations at once for performance
     transformations = {}
     for col_name in columns:
-        # Trim whitespace first, then check if it's a null sentinel
-        trimmed_col = F.trim(F.col(col_name))
+        # Trim ALL whitespace (spaces, tabs, newlines, etc.), then check if it's a null sentinel
+        # Use regexp_replace instead of trim() because trim() only removes ASCII spaces
+        trimmed_col = F.regexp_replace(F.col(col_name), r"^\s+|\s+$", "")
         transformations[col_name] = F.when(
             trimmed_col.isin(null_sentinels), None
-        ).otherwise(F.col(col_name))
+        ).otherwise(trimmed_col)  # Return trimmed value, not original
     
     df = df.withColumns(transformations)
     
@@ -140,52 +144,37 @@ def normalize_null_sentinels(df: DataFrame, columns: Optional[List[str]] = None)
 
 
 def strip_utf8_bom(df: DataFrame) -> DataFrame:
-    """Strip UTF-8 BOM (\\ufeff) from column names.
+    """Strip UTF-8 BOM (\\ufeff) from all column names.
     
-    Utility 2's DER files have UTF-8 BOM on the first header column,
-    breaking schema matching. This removes it.
+    Auto Loader with UTF-8 BOM-encoded files can produce column names like:
+        \ufeffCircuits_Phase3_CIRCUIT
+    
+    This function removes the BOM character from all column names.
     
     Args:
-        df: Input DataFrame
+        df: Input DataFrame with potentially BOM-prefixed column names
         
     Returns:
         DataFrame with cleaned column names
         
     Example:
+        >>> # Auto Loader output might have BOM in first column
+        >>> df = spark.read.format("csv").option("header", "true").load(path)
         >>> df = strip_utf8_bom(df)
     """
-    # Check if any column has BOM
-    bom_cols = [c for c in df.columns if c.startswith('\ufeff')]
+    # Check if any column name starts with BOM
+    bom_char = "\ufeff"
+    renamed_columns = {}
     
-    if not bom_cols:
-        return df
+    for col_name in df.columns:
+        if col_name.startswith(bom_char):
+            # Remove BOM prefix
+            clean_name = col_name.replace(bom_char, "")
+            renamed_columns[col_name] = clean_name
     
-    # Rename columns to remove BOM
-    for old_name in bom_cols:
-        new_name = old_name.replace('\ufeff', '')
-        df = df.withColumnRenamed(old_name, new_name)
+    # Apply renames if needed
+    if renamed_columns:
+        for old_name, new_name in renamed_columns.items():
+            df = df.withColumnRenamed(old_name, new_name)
     
     return df
-
-
-def extract_utility_id_from_path(path: str) -> str:
-    """Extract utility ID from file path.
-    
-    Path format: /Volumes/.../landing/{utility_id}/{dataset_type}/*.csv
-    
-    Args:
-        path: Full file path
-        
-    Returns:
-        Utility ID (or 'unknown' if pattern doesn't match)
-        
-    Example:
-        >>> extract_utility_id_from_path("/Volumes/dev/bronze/landing/utility_1/circuits/file.csv")
-        'utility_1'
-    """
-    try:
-        parts = path.split('/')
-        landing_idx = parts.index('landing')
-        return parts[landing_idx + 1]
-    except (ValueError, IndexError):
-        return 'unknown'

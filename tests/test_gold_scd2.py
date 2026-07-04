@@ -266,9 +266,18 @@ class TestSCD2EdgeCases:
     
     def test_handles_null_feeder_id_in_der(self, spark):
         """Test that unresolved DER (NULL feeder_id) are handled."""
+        # Use explicit schema with StringType to handle NULL values
+        schema = StructType([
+            StructField("der_id", StringType(), False),
+            StructField("der_type", StringType(), False),
+            StructField("feeder_id", StringType(), True),  # Nullable
+            StructField("nameplate_rating_kw", StringType(), False),
+            StructField("utility_id", StringType(), False)
+        ])
+        
         data = spark.createDataFrame([
             ("utility1_proj1_SolarPV", "SolarPV", None, "50.0", "utility1"),
-        ], ["der_id", "der_type", "feeder_id", "nameplate_rating_kw", "utility_id"])
+        ], schema)
         
         # NULL feeder_id should be preserved
         row = data.collect()[0]

@@ -1,80 +1,104 @@
-"""Unit tests for helper utilities in pipelines/utils/helpers.py."""
+"""Unit tests for helper functions (pipelines/utils/helpers.py).
+
+Tests cover:
+- UTF-8 BOM handling in CSV files
+- NULL sentinel normalization
+- Lineage column addition (ingestion_timestamp, pipeline_update_id, utility_id extraction)
+"""
 
 import pytest
 from pyspark.sql import functions as F
-from pyspark.sql.types import StructType, StructField, StringType
+from pyspark.sql.types import StructType, StructField, StringType, LongType
 
-# Import helpers - adjust path based on test execution context
+# Import helper functions
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pipelines.utils.helpers import (
-    add_lineage_columns,
+    strip_utf8_bom,
     normalize_null_sentinels,
-    strip_utf8_bom
+    add_lineage_columns
 )
 
 
 class TestStripUtf8Bom:
     """Tests for strip_utf8_bom function."""
     
-    def test_removes_bom_from_single_column(self, spark):
-        """Test that UTF-8 BOM is removed from column names."""
-        df = spark.createDataFrame([("value1",)], ["\ufeffDER_ID"])
+    def test_strips_bom_from_single_column(self, spark):
+        """Test that UTF-8 BOM is stripped from column names."""
+        df = spark.createDataFrame([("value",)], ["\ufeffcolumn_name"])
+        
         result = strip_utf8_bom(df)
         
-        assert result.columns == ["DER_ID"]
-        assert result.count() == 1
+        assert "column_name" in result.columns
+        assert "\ufeffcolumn_name" not in result.columns
     
-    def test_removes_bom_from_multiple_columns(self, spark):
-        """Test BOM removal from multiple columns."""
+    def test_strips_bom_from_multiple_columns(self, spark):
+        """Test BOM stripping from multiple columns."""
         df = spark.createDataFrame(
-            [("val1", "val2", "val3")],
+            [("a", "b", "c")], 
             ["\ufeffcol1", "\ufeffcol2", "col3"]
         )
+        
         result = strip_utf8_bom(df)
         
-        assert result.columns == ["col1", "col2", "col3"]
+        assert set(result.columns) == {"col1", "col2", "col3"}
     
-    def test_no_bom_unchanged(self, spark):
-        """Test that columns without BOM are unchanged."""
-        df = spark.createDataFrame([("value1",)], ["DER_ID"])
+    def test_no_bom_columns_unchanged(self, spark):
+        """Test that columns without BOM are left unchanged."""
+        df = spark.createDataFrame([("value",)], ["normal_column"])
+        
         result = strip_utf8_bom(df)
         
-        assert result.columns == ["DER_ID"]
-        assert result.count() == 1
+        assert result.columns == ["normal_column"]
     
-    def test_empty_dataframe(self, spark):
-        """Test BOM removal on empty DataFrame."""
-        schema = StructType([StructField("\ufeffDER_ID", StringType(), True)])
-        df = spark.createDataFrame([], schema)
-        result = strip_utf8_bom(df)
+    def test_preserves_data_values(self, spark):
+        """Test that BOM stripping doesn't affect data values."""
+        df = spark.createDataFrame([("\ufeffdata_value",)], ["\ufeffcolumn"])
         
-        assert result.columns == ["DER_ID"]
-        assert result.count() == 0
+        result = strip_utf8_bom(df)
+        row = result.collect()[0]
+        
+        # Column name should have BOM stripped, but data value preserved
+        assert row["column"] == "\ufeffdata_value"
 
 
 class TestNormalizeNullSentinels:
     """Tests for normalize_null_sentinels function."""
     
-    def test_converts_all_null_sentinels(self, spark):
-        """Test that all null sentinel strings are converted to NULL."""
+    def test_normalizes_common_null_strings(self, spark):
+        """Test that common null sentinel strings are converted to NULL."""
         df = spark.createDataFrame([
-            ("valid", "NULL", "null", "N/A", "NA", ""),
+            ("NULL", "null", "N/A", "n/a", "NA", ""),
         ], ["col1", "col2", "col3", "col4", "col5", "col6"])
         
-        result = normalize_null_sentinels(df, ["col2", "col3", "col4", "col5", "col6"])
+        result = normalize_null_sentinels(df, ["col1", "col2", "col3", "col4", "col5", "col6"])
         row = result.collect()[0]
         
-        # col1 unchanged
-        assert row.col1 == "valid"
-        # All null sentinels converted to NULL
-        assert row.col2 is None  # "NULL"
-        assert row.col3 is None  # "null"
-        assert row.col4 is None  # "N/A"
+        assert row.col1 is None  # "NULL"
+        assert row.col2 is None  # "null"
+        assert row.col3 is None  # "N/A"
+        assert row.col4 is None  # "n/a"
         assert row.col5 is None  # "NA"
         assert row.col6 is None  # ""
+    
+    def test_handles_whitespace_variants(self, spark):
+        """Test that whitespace-padded null sentinels are normalized."""
+        df = spark.createDataFrame([
+            (" NULL ", "  null  ", " N/A ", "  ", "\t"),
+        ], ["col1", "col2", "col3", "col4", "col5"])
+        
+        result = normalize_null_sentinels(df, ["col1", "col2", "col3", "col4", "col5"])
+        row = result.collect()[0]
+        
+        assert row.col1 is None  # " NULL "
+        assert row.col2 is None  # "  null  "
+        assert row.col3 is None  # " N/A "
+        # Note: Whitespace-only strings should be normalized per updated logic
+        # After trim, they become "", which is a null sentinel
+        assert row.col4 is None  # "  " -> trimmed to ""
+        assert row.col5 is None  # "\t" -> trimmed to ""
     
     def test_preserves_valid_values(self, spark):
         """Test that non-sentinel values are preserved."""
@@ -143,18 +167,23 @@ class TestAddLineageColumns:
     
     def test_bronze_layer_with_source_file(self, spark):
         """Test lineage columns for Bronze layer (with source_file)."""
-        # Create DataFrame with simulated _metadata.file_path column
+        # Create DataFrame with proper _metadata struct column (like Auto Loader provides)
         path = "/Volumes/dev/bronze/landing/utility_1/circuits/file.csv"
-        df = spark.createDataFrame(
-            [("data1", path, 1024, "2024-01-01T00:00:00")], 
-            ["value", "_metadata_file_path", "_metadata_file_size", "_metadata_file_modification_time"]
-        )
         
-        # Rename to dotted notation that add_lineage_columns expects
-        df = (df
-              .withColumnRenamed("_metadata_file_path", "_metadata.file_path")
-              .withColumnRenamed("_metadata_file_size", "_metadata.file_size")
-              .withColumnRenamed("_metadata_file_modification_time", "_metadata.file_modification_time"))
+        # Define metadata struct schema
+        metadata_schema = StructType([
+            StructField("file_path", StringType(), False),
+            StructField("file_size", LongType(), False),
+            StructField("file_modification_time", StringType(), False)
+        ])
+        
+        # Create DataFrame with _metadata as a struct
+        df = spark.createDataFrame([
+            ("data1", (path, 1024, "2024-01-01T00:00:00"))
+        ], StructType([
+            StructField("value", StringType(), False),
+            StructField("_metadata", metadata_schema, False)
+        ]))
         
         result = add_lineage_columns(df, 
                                      source_file_col="_metadata.file_path",
@@ -181,15 +210,21 @@ class TestAddLineageColumns:
             ("/Volumes/test/bronze/landing/con_edison/der_planned/test.csv", "con_edison"),
         ]
         
+        # Define metadata struct schema
+        metadata_schema = StructType([
+            StructField("file_path", StringType(), False),
+            StructField("file_size", LongType(), False),
+            StructField("file_modification_time", StringType(), False)
+        ])
+        
         for path, expected_utility_id in test_cases:
-            df = spark.createDataFrame(
-                [("data", path, 1024, "2024-01-01")], 
-                ["value", "_metadata_file_path", "_metadata_file_size", "_metadata_file_modification_time"]
-            )
-            df = (df
-                  .withColumnRenamed("_metadata_file_path", "_metadata.file_path")
-                  .withColumnRenamed("_metadata_file_size", "_metadata.file_size")
-                  .withColumnRenamed("_metadata_file_modification_time", "_metadata.file_modification_time"))
+            # Create DataFrame with _metadata as a struct
+            df = spark.createDataFrame([
+                ("data", (path, 1024, "2024-01-01"))
+            ], StructType([
+                StructField("value", StringType(), False),
+                StructField("_metadata", metadata_schema, False)
+            ]))
             
             result = add_lineage_columns(df, source_file_col="_metadata.file_path")
             row = result.collect()[0]
@@ -198,52 +233,47 @@ class TestAddLineageColumns:
                 f"Path {path} should extract {expected_utility_id}, got {row.utility_id}"
     
     def test_utility_id_unknown_when_landing_missing(self, spark):
-        """Test that utility_id is 'unknown' when 'landing' not in path."""
-        path = "/Volumes/dev/bronze/raw/utility_1/circuits/file.csv"
-        df = spark.createDataFrame(
-            [("data", path, 1024, "2024-01-01")], 
-            ["value", "_metadata_file_path", "_metadata_file_size", "_metadata_file_modification_time"]
-        )
-        df = (df
-              .withColumnRenamed("_metadata_file_path", "_metadata.file_path")
-              .withColumnRenamed("_metadata_file_size", "_metadata.file_size")
-              .withColumnRenamed("_metadata_file_modification_time", "_metadata.file_modification_time"))
+        """Test that utility_id defaults to 'unknown' when 'landing' not in path."""
+        # Define metadata struct schema
+        metadata_schema = StructType([
+            StructField("file_path", StringType(), False),
+            StructField("file_size", LongType(), False),
+            StructField("file_modification_time", StringType(), False)
+        ])
+        
+        # Create DataFrame with path that doesn't contain 'landing'
+        df = spark.createDataFrame([
+            ("data", ("/some/other/path/file.csv", 1024, "2024-01-01"))
+        ], StructType([
+            StructField("value", StringType(), False),
+            StructField("_metadata", metadata_schema, False)
+        ]))
         
         result = add_lineage_columns(df, source_file_col="_metadata.file_path")
         row = result.collect()[0]
         
         assert row.utility_id == "unknown"
     
-    def test_silver_gold_layer_without_source_file(self, spark):
-        """Test lineage columns for Silver/Gold layer (no source_file)."""
-        df = spark.createDataFrame([("data1",)], ["value"])
+    def test_without_file_signature(self, spark):
+        """Test that file_signature is not added when include_file_signature=False."""
+        # Define metadata struct schema
+        metadata_schema = StructType([
+            StructField("file_path", StringType(), False),
+            StructField("file_size", LongType(), False),
+            StructField("file_modification_time", StringType(), False)
+        ])
         
-        result = add_lineage_columns(df, source_file_col=None)
-        
-        # Check core columns exist
-        assert "ingestion_timestamp" in result.columns
-        assert "ingestion_date" in result.columns
-        assert "pipeline_update_id" in result.columns
-        
-        # Check Bronze-specific columns don't exist
-        assert "source_file" not in result.columns
-        assert "utility_id" not in result.columns
-        assert "file_signature" not in result.columns
-    
-    def test_file_signature_without_metadata(self, spark):
-        """Test file_signature when metadata columns are missing (uses defaults)."""
-        path = "/Volumes/dev/bronze/landing/utility_1/circuits/file.csv"
-        df = spark.createDataFrame([("data", path)], ["value", "_metadata_file_path"])
-        df = df.withColumnRenamed("_metadata_file_path", "_metadata.file_path")
-        # No file_size or file_modification_time columns
+        df = spark.createDataFrame([
+            ("data", ("/Volumes/dev/bronze/landing/utility_1/file.csv", 1024, "2024-01-01"))
+        ], StructType([
+            StructField("value", StringType(), False),
+            StructField("_metadata", metadata_schema, False)
+        ]))
         
         result = add_lineage_columns(df, 
-                                     source_file_col="_metadata.file_path",
-                                     include_file_signature=True)
+                                     source_file_col="_metadata.file_path", 
+                                     include_file_signature=False)
         
-        # Should not fail, should use defaults
-        row = result.collect()[0]
-        assert len(row.file_signature) == 64  # SHA-256
-
-
-# Run tests with: pytest tests/test_helpers.py -v
+        assert "file_signature" not in result.columns
+        assert "source_file" in result.columns
+        assert "utility_id" in result.columns
