@@ -46,7 +46,6 @@ try:
         unpivot_utility1_der,
         map_circuits_to_canonical,
         map_der_to_canonical,
-        get_canonical_columns,
     )
 except ImportError:
     import sys
@@ -60,7 +59,6 @@ except ImportError:
         unpivot_utility1_der,
         map_circuits_to_canonical,
         map_der_to_canonical,
-        get_canonical_columns,
     )
 
 
