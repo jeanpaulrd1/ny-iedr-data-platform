@@ -74,6 +74,7 @@ except ImportError:
 )
 @dlt.expect_or_drop("valid_feeder_id", "feeder_id IS NOT NULL AND feeder_id != ''")
 @dlt.expect_or_drop("valid_utility_id", "utility_id IS NOT NULL")
+@dlt.expect_or_drop("valid_hca_refresh_date", "hca_refresh_date IS NOT NULL")  # Required for SCD2 sequence_by
 def circuits_standardized():
     """Transform Bronze circuits into canonical Silver schema.
     

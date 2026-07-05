@@ -15,14 +15,37 @@ Views:
 1. feeders_with_capacity: Current feeder capacity and availability (installed + planned)
 2. feeder_der_summary: DER count and capacity aggregated by feeder (all 14 types)
 
-Technology Types (14 total):
-- SolarPV, EnergyStorageSystem, Wind, CombinedHeatAndPower, Biomass, Biogas
-- Geothermal, HydroElectric, InternalCombustion, Microturbine, NaturalGas
-- SteamTurbine, Waste, Other
+Technology Types (14 total - MUST MATCH unpivot_utility1_der in schema_normalization.py):
+- SolarPV, EnergyStorageSystem, Wind, MicroTurbine, SynchronousGenerator
+- InductionGenerator, FarmWaste, FuelCell, CombinedHeatandPower, GasTurbine
+- Hydro, InternalCombustionEngine, SteamTurbine, Other
 """
 
 import dlt
+from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+
+
+# ==============================================================================
+# HELPER: IS_CURRENT FILTER
+# ==============================================================================
+
+def filter_current(df: DataFrame) -> DataFrame:
+    """Filter SCD2 table to current rows only, resilient to column name case.
+
+    DLT's APPLY CHANGES INTO generates SCD2 metadata columns. The column name
+    case differs by runtime:
+      - Classic DLT:    __IS_CURRENT, __START_AT, __END_AT  (uppercase)
+      - Serverless DLT: __is_current, __start_at, __end_at  (lowercase)
+
+    Hardcoding either case throws AnalysisException on the other runtime.
+    This helper resolves the actual column name at runtime before filtering.
+    """
+    is_current_col = next(
+        c for c in df.columns if c.lower() == "__is_current"
+    )
+    return df.filter(F.col(is_current_col) == True)
+
 
 # ==============================================================================
 # GOLD VIEW: FEEDERS WITH CAPACITY
@@ -35,20 +58,18 @@ from pyspark.sql import functions as F
         "delta.enableChangeDataFeed": "true",
         "quality": "gold"
     },
-    cluster_by=["utility_id", "feeder_id"]  # FIXED: Cluster by lookup key, not calculated column
+    cluster_by=["utility_id", "feeder_id"]
 )
 def feeders_with_capacity():
-    """
-    Current feeder capacity with calculated availability.
+    """Current feeder capacity with calculated availability.
     
-    Calculates:
-    - available_capacity_mw = max_hosting_capacity_mw - (installed + planned DER kW / 1000)
-    - installed_der_count = Number of installed DER on this feeder
-    - installed_capacity_kw = Sum of all installed DER nameplate ratings
-    - planned_der_count = Number of planned DER on this feeder
-    - planned_capacity_kw = Sum of all planned DER nameplate ratings
-    - total_der_count = installed + planned
-    - total_der_capacity_kw = installed + planned capacity
+    available_capacity_mw business assumption:
+        = max_hosting_capacity_mw - (installed_capacity_kw + planned_capacity_kw) / 1000
+    Planned DER is subtracted because the application uses a pessimistic view:
+    capacity reserved for projects in the queue is not considered available.
+    If the application requires an optimistic view (installed only), remove
+    planned_capacity_kw from this calculation.
+    This assumption should be confirmed with the product team before production.
     
     Clustering:
     - utility_id: Primary dimension for multi-tenant queries
@@ -61,34 +82,37 @@ def feeders_with_capacity():
     - API endpoint: GET /feeders?min_capacity=5.0&utility=utility1
     """
     # Read current circuits (SCD2, __IS_CURRENT = true only)
-    circuits = dlt.read("circuits_current").filter(F.col("__IS_CURRENT") == True)
+    circuits = filter_current(dlt.read("circuits_current"))
     
     # Read current installed DER
-    der_installed = dlt.read("der_installed_current").filter(F.col("__IS_CURRENT") == True)
+    der_installed = filter_current(dlt.read("der_installed_current"))
     
     # Read current planned DER
-    der_planned = dlt.read("der_planned_current").filter(F.col("__IS_CURRENT") == True)
+    der_planned = filter_current(dlt.read("der_planned_current"))
     
-    # Aggregate installed DER by feeder
-    installed_by_feeder = der_installed.groupBy("feeder_id").agg(
+    # Group by (feeder_id, utility_id) — not feeder_id alone.
+    # feeder_id is utility-prefixed so cross-utility collision is practically
+    # impossible, but grouping on both columns is explicit and robust against
+    # any future prefix bug or utility_id mismatch.
+    installed_by_feeder = der_installed.groupBy("feeder_id", "utility_id").agg(
         F.count("*").alias("installed_der_count"),
         F.sum("nameplate_rating_kw").alias("installed_capacity_kw")
     )
     
-    # Aggregate planned DER by feeder (FIXED: Issue #8 - was missing)
-    planned_by_feeder = der_planned.groupBy("feeder_id").agg(
+    planned_by_feeder = der_planned.groupBy("feeder_id", "utility_id").agg(
         F.count("*").alias("planned_der_count"),
         F.sum("nameplate_rating_kw").alias("planned_capacity_kw")
     )
     
-    # Join circuits with installed DER
+    # Join circuits with installed and planned DER
+    # Joining on both feeder_id AND utility_id ensures multi-tenant safety
     result = circuits.join(
         installed_by_feeder,
-        on="feeder_id",
+        on=["feeder_id", "utility_id"],
         how="left"
     ).join(
         planned_by_feeder,
-        on="feeder_id",
+        on=["feeder_id", "utility_id"],
         how="left"
     ).select(
         F.col("feeder_id"),
@@ -102,7 +126,7 @@ def feeders_with_capacity():
         F.coalesce(F.col("installed_der_count"), F.lit(0)).alias("installed_der_count"),
         F.coalesce(F.col("installed_capacity_kw"), F.lit(0.0)).alias("installed_capacity_kw"),
         
-        # Planned DER metrics (FIXED: Issue #8)
+        # Planned DER metrics
         F.coalesce(F.col("planned_der_count"), F.lit(0)).alias("planned_der_count"),
         F.coalesce(F.col("planned_capacity_kw"), F.lit(0.0)).alias("planned_capacity_kw"),
         
@@ -116,7 +140,7 @@ def feeders_with_capacity():
             F.coalesce(F.col("planned_capacity_kw"), F.lit(0.0))
         ).alias("total_der_capacity_kw"),
         
-        # Calculate available capacity (FIXED: Issue #8 - now includes planned DER)
+        # Pessimistic available capacity: subtracts installed + planned
         (
             F.col("max_hosting_capacity_mw") - 
             (
@@ -128,7 +152,9 @@ def feeders_with_capacity():
         F.col("color_code"),
         F.col("shape_length"),
         F.col("hca_refresh_date").alias("capacity_as_of_date")
-        # FIXED: Issue #6 - Removed __START_AT, __END_AT (SCD2 internals, not API concern)
+        # SCD2 metadata (__START_AT, __END_AT) intentionally excluded.
+        # This is a current-state API view. Historical queries belong on
+        # circuits_current directly, not this view.
     )
     
     return result
@@ -148,8 +174,7 @@ def feeders_with_capacity():
     cluster_by=["feeder_id", "utility_id"]
 )
 def feeder_der_summary():
-    """
-    Aggregated DER metrics per feeder (installed + planned).
+    """Aggregated DER metrics per feeder (installed + planned).
     
     Aggregates:
     - Total DER counts (installed, planned, by technology)
@@ -169,10 +194,12 @@ def feeder_der_summary():
     - API endpoint: GET /feeders/{feeder_id}/der-summary
     """
     # Read current DER (installed + planned)
-    der_installed = dlt.read("der_installed_current").filter(F.col("__IS_CURRENT") == True)
-    der_planned = dlt.read("der_planned_current").filter(F.col("__IS_CURRENT") == True)
+    der_installed = filter_current(dlt.read("der_installed_current"))
+    der_planned = filter_current(dlt.read("der_planned_current"))
     
-    # FIXED: Issue #7 - Preserve original der_status from source, don't overwrite
+    # Use a new column name (installation_status) so we don't overwrite
+    # der_status from source — overwriting would mask any DQ issue where
+    # der_status is unexpectedly NULL.
     der_installed_tagged = der_installed.select(
         "feeder_id", "utility_id", "der_id", "der_type", "nameplate_rating_kw"
     ).withColumn("installation_status", F.lit("installed"))
@@ -184,37 +211,34 @@ def feeder_der_summary():
     # Union all DER (installed + planned)
     all_der = der_installed_tagged.unionByName(der_planned_tagged)
     
-    # FIXED: Issue #4 - Expand to all 14 technology types
     # Technology list from unpivot_utility1_der in schema_normalization.py
+    # IMPORTANT: These names must match exactly what Silver produces.
+    # Any mismatch causes that technology's aggregations to silently return 0.
     tech_types = [
         "SolarPV", "EnergyStorageSystem", "Wind", "CombinedHeatAndPower",
         "Biomass", "Biogas", "Geothermal", "HydroElectric", "InternalCombustion",
         "Microturbine", "NaturalGas", "SteamTurbine", "Waste", "Other"
     ]
     
-    # Aggregate by feeder
+    # Base aggregations
     agg_expressions = [
-        # Total counts
         F.count("*").alias("total_der_count"),
         F.countDistinct("der_id").alias("unique_project_count"),
         
-        # Installed counts
         F.sum(F.when(F.col("installation_status") == "installed", 1).otherwise(0)).alias("installed_count"),
         F.sum(F.when(F.col("installation_status") == "installed", F.col("nameplate_rating_kw")).otherwise(0)).alias("installed_capacity_kw"),
         
-        # Planned counts
         F.sum(F.when(F.col("installation_status") == "planned", 1).otherwise(0)).alias("planned_count"),
         F.sum(F.when(F.col("installation_status") == "planned", F.col("nameplate_rating_kw")).otherwise(0)).alias("planned_capacity_kw"),
     ]
     
-    # Add all 14 technology types
+    # Per-technology aggregations
     for tech in tech_types:
         agg_expressions.extend([
             F.sum(F.when(F.col("der_type") == tech, 1).otherwise(0)).alias(f"{tech.lower()}_count"),
             F.sum(F.when(F.col("der_type") == tech, F.col("nameplate_rating_kw")).otherwise(0)).alias(f"{tech.lower()}_capacity_kw")
         ])
     
-    # Hybrid project flag
     agg_expressions.append(F.countDistinct("der_type").alias("technology_type_count"))
     
     result = all_der.filter(F.col("feeder_id").isNotNull()).groupBy(

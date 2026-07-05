@@ -57,7 +57,7 @@ dlt.create_target_table(
 dlt.apply_changes(
     target="circuits_current",
     source="circuits_standardized",
-    keys=["utility_id", "feeder_id"],  # FIXED: Added utility_id for explicit multi-tenant key
+    keys=["utility_id", "feeder_id"],
     sequence_by="hca_refresh_date",
     stored_as_scd_type=2,
     except_column_list=[
@@ -87,26 +87,30 @@ dlt.create_target_table(
     table_properties={
         "delta.enableChangeDataFeed": "true"
     },
-    cluster_by=["utility_id", "der_id"]
+    cluster_by=["utility_id", "feeder_id"]
 )
 
 dlt.apply_changes(
     target="der_installed_current",
     source="der_installed_standardized",
-    keys=["der_id", "der_type"],
-    sequence_by="ingestion_date",  # Day-level sequencing (not timestamp)
+    keys=["utility_id", "der_id", "der_type"],
+    # utility_id: explicit multi-tenant key to prevent DER ID collisions across utilities
+    # der_id: project identifier
+    # der_type: required because utility 1 unpivot produces one row per technology per project
+    #           Without der_type in keys, APPLY CHANGES keeps only one row per project and
+    #           silently drops other technologies on every update
+    sequence_by="ingestion_date",
     stored_as_scd_type=2,
     except_column_list=[
-        "ingestion_timestamp",  # Hour/minute changes ignored
+        "ingestion_timestamp",
         "pipeline_update_id"
         # Note: ingestion_date is NOT in except_column_list (it drives sequencing)
     ],
     track_history_column_list=[
-        "utility_id",
         "feeder_id",
         "native_feeder_id_raw",
         "nameplate_rating_kw"
-        # Note: der_status removed from track_history - see API views for proper status handling
+        # Note: utility_id is in keys, implicitly tracked (consistent with circuits_current)
     ]
 )
 
@@ -121,27 +125,26 @@ dlt.create_target_table(
     table_properties={
         "delta.enableChangeDataFeed": "true"
     },
-    cluster_by=["utility_id", "der_id"]
+    cluster_by=["utility_id", "feeder_id"]
 )
 
 dlt.apply_changes(
     target="der_planned_current",
     source="der_planned_standardized",
-    keys=["der_id", "der_type"],
-    sequence_by="ingestion_date",  # Day-level sequencing (not timestamp)
+    keys=["utility_id", "der_id", "der_type"],
+    sequence_by="ingestion_date",
     stored_as_scd_type=2,
     except_column_list=[
-        "ingestion_timestamp",  # Hour/minute changes ignored
+        "ingestion_timestamp",
         "pipeline_update_id"
         # Note: ingestion_date is NOT in except_column_list (it drives sequencing)
     ],
     track_history_column_list=[
-        "utility_id",
         "feeder_id",
         "native_feeder_id_raw",
         "nameplate_rating_kw",
         "planned_installation_date",
         "interconnection_queue_id"
-        # Note: der_status removed from track_history - see API views for proper status handling
+        # Note: utility_id is in keys, implicitly tracked (consistent with circuits_current)
     ]
 )
