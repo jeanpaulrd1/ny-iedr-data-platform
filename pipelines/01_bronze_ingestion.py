@@ -12,7 +12,6 @@ Key Features:
 - Schema evolution enabled (addNewColumns mode)
 - _rescued_data captures unexpected columns
 - utility_id injected from directory path structure
-- Partition by ingestion_date, cluster by utility_id
 - Lineage tracking via pipeline_update_id
 """
 
@@ -69,7 +68,7 @@ def get_auto_loader_options(dataset_type: str) -> dict:
 # ==============================================================================
 
 @dlt.table(
-    name="circuits_raw",
+    name="dev_iedr.bronze.circuits_raw",
     comment="Raw circuit/feeder data from all utilities (shared table)",
     table_properties={
         "quality": "bronze",
@@ -109,7 +108,7 @@ def circuits_raw():
 # ==============================================================================
 
 @dlt.table(
-    name="der_installed_raw",
+    name="dev_iedr.bronze.der_installed_raw",
     comment="Raw installed DER data from all utilities (shared table)",
     table_properties={
         "quality": "bronze",
@@ -148,7 +147,7 @@ def der_installed_raw():
 # ==============================================================================
 
 @dlt.table(
-    name="der_planned_raw",
+    name="dev_iedr.bronze.der_planned_raw",
     comment="Raw planned DER data from all utilities (shared table)",
     table_properties={
         "quality": "bronze",
@@ -187,7 +186,7 @@ def der_planned_raw():
 # ==============================================================================
 
 @dlt.table(
-    name="file_tracking",
+    name="dev_iedr.bronze.file_tracking",
     comment="Audit trail for all ingested files with idempotency tracking",
     table_properties={
         "quality": "bronze"

@@ -46,7 +46,7 @@ from pyspark.sql import functions as F
 # ==============================================================================
 
 dlt.create_target_table(
-    name="circuits_current",
+    name="dev_iedr.gold.circuits_current",
     comment="SCD Type 2 history of feeder capacity changes - tracks max/min hosting capacity over time",
     table_properties={
         "delta.enableChangeDataFeed": "true"
@@ -55,8 +55,8 @@ dlt.create_target_table(
 )
 
 dlt.apply_changes(
-    target="circuits_current",
-    source="circuits_standardized",
+    target="dev_iedr.gold.circuits_current",
+    source="dev_iedr.silver.circuits_standardized",
     keys=["utility_id", "feeder_id"],
     sequence_by="hca_refresh_date",
     stored_as_scd_type=2,
@@ -82,7 +82,7 @@ dlt.apply_changes(
 # ==============================================================================
 
 dlt.create_target_table(
-    name="der_installed_current",
+    name="dev_iedr.gold.der_installed_current",
     comment="SCD Type 2 history of installed DER projects - tracks installations and capacity changes",
     table_properties={
         "delta.enableChangeDataFeed": "true"
@@ -91,8 +91,8 @@ dlt.create_target_table(
 )
 
 dlt.apply_changes(
-    target="der_installed_current",
-    source="der_installed_standardized",
+    target="dev_iedr.gold.der_installed_current",
+    source="dev_iedr.silver.der_installed_standardized",
     keys=["utility_id", "der_id", "der_type"],
     # utility_id: explicit multi-tenant key to prevent DER ID collisions across utilities
     # der_id: project identifier
@@ -120,7 +120,7 @@ dlt.apply_changes(
 # ==============================================================================
 
 dlt.create_target_table(
-    name="der_planned_current",
+    name="dev_iedr.gold.der_planned_current",
     comment="SCD Type 2 history of planned DER projects - tracks queue status and planned installation dates",
     table_properties={
         "delta.enableChangeDataFeed": "true"
@@ -129,8 +129,8 @@ dlt.create_target_table(
 )
 
 dlt.apply_changes(
-    target="der_planned_current",
-    source="der_planned_standardized",
+    target="dev_iedr.gold.der_planned_current",
+    source="dev_iedr.silver.der_planned_standardized",
     keys=["utility_id", "der_id", "der_type"],
     sequence_by="ingestion_date",
     stored_as_scd_type=2,

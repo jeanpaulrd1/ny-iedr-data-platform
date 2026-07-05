@@ -58,7 +58,7 @@ def filter_current(df: DataFrame) -> DataFrame:
 # ==============================================================================
 
 @dlt.table(
-    name="feeders_with_capacity",
+    name="dev_iedr.gold.feeders_with_capacity",
     comment="API-optimized view of current feeder capacity with calculated availability (installed + planned DER)",
     table_properties={
         "delta.enableChangeDataFeed": "true",
@@ -88,13 +88,13 @@ def feeders_with_capacity():
     - API endpoint: GET /feeders?min_capacity=5.0&utility=utility1
     """
     # Read current circuits (SCD2, __IS_CURRENT = true only)
-    circuits = filter_current(dlt.read("circuits_current"))
+    circuits = filter_current(dlt.read("dev_iedr.gold.circuits_current"))
     
     # Read current installed DER
-    der_installed = filter_current(dlt.read("der_installed_current"))
+    der_installed = filter_current(dlt.read("dev_iedr.gold.der_installed_current"))
     
     # Read current planned DER
-    der_planned = filter_current(dlt.read("der_planned_current"))
+    der_planned = filter_current(dlt.read("dev_iedr.gold.der_planned_current"))
     
     # Group by (feeder_id, utility_id) — not feeder_id alone.
     # feeder_id is utility-prefixed so cross-utility collision is practically
@@ -172,7 +172,7 @@ def feeders_with_capacity():
 # ==============================================================================
 
 @dlt.table(
-    name="feeder_der_summary",
+    name="dev_iedr.gold.feeder_der_summary",
     comment="API-optimized view of DER aggregations per feeder - counts, capacity, status breakdown (all 14 technology types)",
     table_properties={
         "delta.enableChangeDataFeed": "true",
@@ -201,8 +201,8 @@ def feeder_der_summary():
     - API endpoint: GET /feeders/{feeder_id}/der-summary
     """
     # Read current DER (installed + planned)
-    der_installed = filter_current(dlt.read("der_installed_current"))
-    der_planned = filter_current(dlt.read("der_planned_current"))
+    der_installed = filter_current(dlt.read("dev_iedr.gold.der_installed_current"))
+    der_planned = filter_current(dlt.read("dev_iedr.gold.der_planned_current"))
     
     # Use a new column name (installation_status) so we don't overwrite
     # der_status from source — overwriting would mask any DQ issue where

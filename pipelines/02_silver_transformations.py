@@ -67,7 +67,7 @@ except ImportError:
 # ==============================================================================
 
 @dlt.table(
-    name="circuits_standardized",
+    name="dev_iedr.silver.circuits_standardized",
     comment="Standardized circuit/feeder data - feeder-level, common schema across utilities (full-refresh)"
 )
 @dlt.expect_or_drop("valid_feeder_id", "feeder_id IS NOT NULL AND feeder_id != ''")
@@ -93,7 +93,7 @@ def circuits_standardized():
         Standardized circuits DataFrame (feeder-grain)
     """
     # Read from Bronze
-    df = dlt.read("circuits_raw")
+    df = dlt.read("dev_iedr.bronze.circuits_raw")
     
     # Normalize null sentinels before any transformation.
     # .dtypes is evaluated once here at plan construction — safe and cheap.
@@ -138,7 +138,7 @@ def circuits_standardized():
 # ==============================================================================
 
 @dlt.table(
-    name="der_installed_standardized",
+    name="dev_iedr.silver.der_installed_standardized",
     comment="Standardized installed DER - common schema, unresolved feeder_id preserved (full-refresh)"
 )
 @dlt.expect_or_drop("valid_utility_id", "utility_id IS NOT NULL")
@@ -165,7 +165,7 @@ def der_installed_standardized():
         Standardized DER installed DataFrame
     """
     # Read from Bronze
-    df = dlt.read("der_installed_raw")
+    df = dlt.read("dev_iedr.bronze.der_installed_raw")
     
     string_cols = [col for col, dtype in df.dtypes if dtype == "string"]
     df = normalize_null_sentinels(df, string_cols)
@@ -209,7 +209,7 @@ def der_installed_standardized():
 # ==============================================================================
 
 @dlt.table(
-    name="der_planned_standardized",
+    name="dev_iedr.silver.der_planned_standardized",
     comment="Standardized planned DER - common schema, unresolved feeder_id preserved (full-refresh)"
 )
 @dlt.expect_or_drop("valid_utility_id", "utility_id IS NOT NULL")
@@ -227,7 +227,7 @@ def der_planned_standardized():
         Standardized DER planned DataFrame
     """
     # Read from Bronze
-    df = dlt.read("der_planned_raw")
+    df = dlt.read("dev_iedr.bronze.der_planned_raw")
     
     string_cols = [col for col, dtype in df.dtypes if dtype == "string"]
     df = normalize_null_sentinels(df, string_cols)
@@ -274,7 +274,7 @@ def der_planned_standardized():
 # ==============================================================================
 
 @dlt.table(
-    name="data_quality_metrics_silver",
+    name="dev_iedr.silver.data_quality_metrics_silver",
     comment="Data quality metrics per pipeline run — append-only to preserve trend history",
 )
 def data_quality_metrics_silver():
@@ -298,7 +298,7 @@ def data_quality_metrics_silver():
     """
     # ── Circuits ──────────────────────────────────────────────────────────────
     circuits_metrics = (
-        dlt.read_stream("circuits_standardized")
+        dlt.read_stream("dev_iedr.silver.circuits_standardized")
         .groupBy("utility_id", "ingestion_date", "pipeline_update_id")
         .agg(
             F.count("*").alias("total_records"),
@@ -315,7 +315,7 @@ def data_quality_metrics_silver():
 
     # ── DER Installed ─────────────────────────────────────────────────────────
     der_installed_metrics = (
-        dlt.read_stream("der_installed_standardized")
+        dlt.read_stream("dev_iedr.silver.der_installed_standardized")
         .groupBy("utility_id", "ingestion_date", "pipeline_update_id")
         .agg(
             F.count("*").alias("total_records"),
@@ -334,7 +334,7 @@ def data_quality_metrics_silver():
 
     # ── DER Planned ───────────────────────────────────────────────────────────
     der_planned_metrics = (
-        dlt.read_stream("der_planned_standardized")
+        dlt.read_stream("dev_iedr.silver.der_planned_standardized")
         .groupBy("utility_id", "ingestion_date", "pipeline_update_id")
         .agg(
             F.count("*").alias("total_records"),

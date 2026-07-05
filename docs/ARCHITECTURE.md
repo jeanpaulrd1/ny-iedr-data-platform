@@ -2,14 +2,14 @@
 
 ## 🏗️ Medallion Architecture Overview
 
-### Bronze Layer (Raw Ingestion)
+### Bronze Layer (dev_iedr.bronze)
 **Purpose**: Ingest raw CSV files with minimal transformation
 
 **Tables:**
-* `bronze.circuits_raw` - Circuit/feeder infrastructure data
-* `bronze.der_installed_raw` - Installed DER projects  
-* `bronze.der_planned_raw` - Planned DER projects
-* `bronze.file_tracking` - File ingestion audit trail with idempotency
+* `dev_iedr.bronze.circuits_raw` - Circuit/feeder infrastructure data
+* `dev_iedr.bronze.der_installed_raw` - Installed DER projects  
+* `dev_iedr.bronze.der_planned_raw` - Planned DER projects
+* `dev_iedr.bronze.file_tracking` - File ingestion audit trail with idempotency
 
 **Key Features:**
 * Auto Loader (cloudFiles) for incremental ingestion
@@ -29,14 +29,14 @@
 
 ---
 
-### Silver Layer (Standardized, Full-Refresh)
+### Silver Layer (dev_iedr.silver)
 **Purpose**: Standardize schemas, enforce quality, create common data model
 
 **Tables:**
-* `silver.circuits_standardized` - Feeder-level circuits (full-refresh snapshots)
-* `silver.der_installed_standardized` - Normalized DER installations (full-refresh)
-* `silver.der_planned_standardized` - Normalized DER planning queue (full-refresh)
-* `silver.data_quality_metrics_silver` - Data quality metrics from transformations
+* `dev_iedr.silver.circuits_standardized` - Feeder-level circuits (full-refresh snapshots)
+* `dev_iedr.silver.der_installed_standardized` - Normalized DER installations (full-refresh)
+* `dev_iedr.silver.der_planned_standardized` - Normalized DER planning queue (full-refresh)
+* `dev_iedr.silver.data_quality_metrics_silver` - Data quality metrics from transformations
 
 **Transformations:**
 * **Utility 1**: Aggregate segment-level → feeder-level circuits (MAX capacity, not SUM)
@@ -62,15 +62,15 @@
 
 ---
 
-### Gold Layer (Business-Ready + Historical Tracking) ✅ COMPLETE
+### Gold Layer (dev_iedr.gold) ✅ COMPLETE
 **Purpose**: API-optimized aggregates and SCD Type 2 history
 
 **Tables:**
-* `gold.circuits_current` - SCD Type 2 for feeder capacity history
-* `gold.der_installed_current` - SCD Type 2 for DER state tracking
-* `gold.der_planned_current` - SCD Type 2 for DER planning queue history
-* `gold.feeders_with_capacity` - Pre-aggregated: feeders with available capacity (current view)
-* `gold.feeder_der_summary` - Pre-aggregated: all DER per feeder (current view)
+* `dev_iedr.gold.circuits_current` - SCD Type 2 for feeder capacity history
+* `dev_iedr.gold.der_installed_current` - SCD Type 2 for DER state tracking
+* `dev_iedr.gold.der_planned_current` - SCD Type 2 for DER planning queue history
+* `dev_iedr.gold.feeders_with_capacity` - Pre-aggregated: feeders with available capacity (current view)
+* `dev_iedr.gold.feeder_der_summary` - Pre-aggregated: all DER per feeder (current view)
 
 **Key Features:**
 * **SCD Type 2**: Track capacity changes over time via DLT's Auto CDC (`dp.create_auto_cdc_flow`)
@@ -297,7 +297,7 @@ WHERE feeder_id = 'utility1_1105354'
 ## 🔍 Monitoring & Observability
 
 * **DLT Event Logs**: Track pipeline runs, errors, data quality metrics
-* **Data Quality Dashboard**: Query `gold.data_quality_metrics_silver` for trends
+* **Data Quality Dashboard**: Query `dev_iedr.gold.data_quality_metrics_silver` for trends
 * **Pipeline Update ID**: Trace every record to originating run
 * **File Tracking**: Idempotency and deduplication audit trail (`file_tracking` table)
 * **SCD2 History**: Temporal queries via `__START_AT` and `__END_AT`
