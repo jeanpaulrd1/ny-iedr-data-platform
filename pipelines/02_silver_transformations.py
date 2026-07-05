@@ -174,7 +174,8 @@ def der_installed_standardized():
     # include_installation_date=False: installed DER has no planned date column.
     # unpivot emits planned_installation_date_raw = NULL so union schemas align.
     utility1_df = df.filter(F.col("utility_id") == UTILITY1_ID)
-    utility1_unpivoted = unpivot_utility1_der(utility1_df, include_installation_date=False)
+    utility1_unpivoted = unpivot_utility1_der(utility1_df, include_installation_date=False) \
+    .withColumn("interconnection_queue_id", F.lit(None).cast(StringType()))
 
     # Utility 2: Already narrow. Build intermediate schema matching utility 1 output.
     # planned_installation_date_raw and interconnection_queue_id are emitted as NULL
@@ -236,7 +237,8 @@ def der_planned_standardized():
     # and emits planned_installation_date_raw = NULL if the column is absent —
     # no .count() action needed to guard the empty-DataFrame case.
     utility1_df = df.filter(F.col("utility_id") == UTILITY1_ID)
-    utility1_unpivoted = unpivot_utility1_der(utility1_df, include_installation_date=True)
+    utility1_unpivoted = unpivot_utility1_der(utility1_df, include_installation_date=True) \
+    .withColumn("interconnection_queue_id", F.lit(None).cast(StringType()))
 
     # Utility 2: Planned DER uses INTERCONNECTION_QUEUE_REQUEST_ID as der_id.
     # Intermediate schema must match utility 1 output exactly so union is strict

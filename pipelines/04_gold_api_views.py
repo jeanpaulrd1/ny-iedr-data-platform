@@ -41,10 +41,16 @@ def filter_current(df: DataFrame) -> DataFrame:
     Hardcoding either case throws AnalysisException on the other runtime.
     This helper resolves the actual column name at runtime before filtering.
     """
-    is_current_col = next(
-        c for c in df.columns if c.lower() == "__is_current"
+    end_at_col = next(
+        (c for c in df.columns if c.lower() == "__end_at"),
+        None
     )
-    return df.filter(F.col(is_current_col) == True)
+    if end_at_col is None:
+        raise ValueError(
+            f"SCD2 metadata column '__END_AT' not found. "
+            f"Available columns: {df.columns}"
+        )
+    return df.filter(F.col(end_at_col).isNull())
 
 
 # ==============================================================================
@@ -158,6 +164,7 @@ def feeders_with_capacity():
     )
     
     return result
+
 
 
 # ==============================================================================

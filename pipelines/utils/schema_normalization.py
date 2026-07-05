@@ -242,44 +242,69 @@ def map_circuits_to_canonical(df: DataFrame) -> DataFrame:
     )
 
 
-def map_der_to_canonical(df: DataFrame) -> DataFrame:
+def map_der_to_canonical(df: DataFrame, der_table_type: str) -> DataFrame:
     """Map utility-specific DER columns to canonical schema.
     
-    Single-pass transformation using CASE WHEN (not filter-union).
-    Handles both unpivoted utility 1 and native utility 2 formats.
+    Single-pass transformation.
     
-    IMPORTANT: Expects intermediate schema from unpivot_utility1_der and utility2 select.
-    Both utilities should have columns: *_raw, der_id, feeder_id, der_type, nameplate_rating_kw
-    
-    Canonical schema:
-    - der_id (composite for utility1, native ID for utility2)
-    - feeder_id (prefixed: utility1_*, utility2_*)
-    - native_feeder_id (raw feeder ID before prefixing)
-    - der_type (standardized technology name)
-    - nameplate_rating_kw (DOUBLE)
-    - planned_installation_date (DATE, parsed from string)
+    IMPORTANT: Expects intermediate schema where both utilities have:
+    - der_id, feeder_id, native_feeder_id_raw, der_type, nameplate_rating_kw
+    - (planned only): planned_installation_date_raw, interconnection_queue_id
     
     Args:
-        df: Union of utility 1 + utility 2 DER with *_raw columns
-        
-    Returns:
-        DataFrame with canonical schema, ready for SCD2 tracking
+        df: DER DataFrame with intermediate schema
+        der_table_type: 'installed' or 'planned'
+    
+    Canonical schema:
+    - der_id (prefixed: utility1_ProjectID_TechType, utility2_DER_ID)
+    - feeder_id (prefixed, NULL if unresolved)
+    - native_feeder_id_raw (raw before normalization)
+    - der_type (canonical names)
+    - nameplate_rating_kw (DOUBLE)
+    - der_status ('installed' or 'planned')
+    - planned_installation_date (DATE, planned only)
+    - interconnection_queue_id (STRING, utility 2 only)
     """
-    return df.select(
-        "der_id",
-        "feeder_id",
-        "utility_id",
-        "native_feeder_id_raw",
-        "der_type",
-        
-        # Ensure nameplate_rating_kw is DOUBLE (already cast in unpivot for utility1)
+    # Always include planned columns in the select — even for installed DER they will
+    # be NULL. This avoids the "column not found" AnalysisException that occurs when
+    # withColumn tries to reference a column that was excluded from a prior select().
+    # The caller (silver pipeline) emits these columns as NULL for installed DER;
+    # Gold filters them out when building the installed-only view.
+    canonical = df.select(
+        F.col("utility_id"),
+        F.col("der_id"),
+        F.col("feeder_id"),
+        F.col("native_feeder_id_raw"),
+        F.col("der_type"),
         F.col("nameplate_rating_kw").cast("double").alias("nameplate_rating_kw"),
-        
-        # Parse planned installation date (may be NULL)
-        F.to_date(F.col("planned_installation_date_raw")).alias("planned_installation_date"),
-        
-        # Lineage columns
-        "ingestion_timestamp",
-        "ingestion_date",
-        "pipeline_update_id"
+        F.lit(der_table_type).alias("der_status"),
+        # Planned-specific columns: always selected, NULL for installed rows.
+        # "planned_installation_date_raw" is emitted by unpivot_utility1_der (always)
+        # and by the utility 2 silver select (always). Safe to reference here.
+        F.col("planned_installation_date_raw"),
+        # interconnection_queue_id: utility 2 only; utility 1 rows have NULL.
+        F.col("interconnection_queue_id"),
+        F.col("ingestion_timestamp"),
+        F.col("ingestion_date"),
+        F.col("pipeline_update_id"),
     )
+ 
+    if der_table_type == "planned":
+        canonical = canonical.withColumn(
+            "planned_installation_date",
+            # Utility 1: standard date parse from whatever format InServiceDate uses.
+            # Utility 2: "M/d/yyyy" e.g. "6/15/2025".
+            F.when(
+                (F.col("utility_id") == UTILITY1_ID)
+                & F.col("planned_installation_date_raw").isNotNull(),
+                F.to_date(F.col("planned_installation_date_raw")),
+            ).when(
+                F.col("utility_id") == UTILITY2_ID,
+                F.to_date(F.col("planned_installation_date_raw"), "M/d/yyyy"),
+            ),
+        ).drop("planned_installation_date_raw")
+    else:
+        # installed: drop the raw column entirely, not relevant
+        canonical = canonical.drop("planned_installation_date_raw")
+ 
+    return canonical

@@ -71,8 +71,6 @@ def get_auto_loader_options(dataset_type: str) -> dict:
 @dlt.table(
     name="circuits_raw",
     comment="Raw circuit/feeder data from all utilities (shared table)",
-    partition_cols=["ingestion_date"],
-    cluster_by=["utility_id"],
     table_properties={
         "quality": "bronze",
         "delta.enableChangeDataFeed": "true"
@@ -113,8 +111,6 @@ def circuits_raw():
 @dlt.table(
     name="der_installed_raw",
     comment="Raw installed DER data from all utilities (shared table)",
-    partition_cols=["ingestion_date"],
-    cluster_by=["utility_id"],
     table_properties={
         "quality": "bronze",
         "delta.enableChangeDataFeed": "true"
@@ -154,8 +150,6 @@ def der_installed_raw():
 @dlt.table(
     name="der_planned_raw",
     comment="Raw planned DER data from all utilities (shared table)",
-    partition_cols=["ingestion_date"],
-    cluster_by=["utility_id"],
     table_properties={
         "quality": "bronze",
         "delta.enableChangeDataFeed": "true"

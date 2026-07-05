@@ -14,10 +14,18 @@
 **Key Features:**
 * Auto Loader (cloudFiles) for incremental ingestion
 * All columns stored as **STRING** for schema fidelity and evolution
-* **Partitioning + Clustering**: `PARTITION BY ingestion_date` + `CLUSTER BY utility_id`
-  - Partitioning for lifecycle management (simple `DROP PARTITION` for retention)
-  - Clustering within partitions for query performance
-* File tracking with `file_hash` and `pipeline_update_id` for idempotency
+* **No partitioning or clustering** - Raw storage optimized for append-only streaming
+  - Computed columns (`utility_id`) cannot be used for clustering at ingestion
+  - Optimization deferred to Silver/Gold layers where columns are materialized
+* Schema evolution enabled (`addNewColumns` mode)
+* File tracking with `file_signature` and `pipeline_update_id` for idempotency
+* Change data feed enabled for downstream CDC processing
+
+**Data Volumes (as of 2026-07-05):**
+* **utility1**: 64,539 circuit/segment records
+* **utility2**: 1,909 circuit/feeder records
+* **Total DER Installed**: 39,657 projects (utility1: 14,120, utility2: 25,537)
+* **Total DER Planned**: 32,689 projects (utility1: 1,733, utility2: 30,956)
 
 ---
 
@@ -33,80 +41,69 @@
 **Transformations:**
 * **Utility 1**: Aggregate segment-level → feeder-level circuits (MAX capacity, not SUM)
 * **Utility 1**: Unpivot wide DER format (14 one-hot tech columns) → narrow (der_id, der_type, capacity)
+* **Utility 1**: Add `interconnection_queue_id` column (as NULL) to align with utility2 schema
 * **All Utilities**: Normalize null sentinels ("NULL", "null", "" → SQL NULL)
 * **All Utilities**: Map inconsistent field names to unified schema (single-pass CASE WHEN)
 * **All Utilities**: Standardize DER technology types to canonical names
 
 **Key Features:**
 * **Full-Refresh**: Tables rebuilt on each pipeline run from current Bronze data
-* **Liquid Clustering**: `CLUSTER BY utility_id, feeder_id, der_type`
+* **No partitioning**: Pure liquid clustering (partitioning removed to avoid conflicts)
+* **No clustering at Silver**: Deferred to Gold layer for query-specific optimization
 * Data quality expectations enforced (`@dlt.expect_or_drop` on circuits, DER unresolved feeders pass through)
-* No partitioning (liquid clustering handles multi-dimensional queries efficiently)
 * Unresolved DER (feeder_id IS NULL) preserved for data_quality_metrics tracking
 * **Composite DER Keys**: `der_id` includes technology type (e.g., `utility1_proj1_SolarPV`) for hybrid projects
+* **Schema Alignment**: Strict union without `allowMissingColumns` to catch schema drift early
+
+**Data Quality Issues Tracked:**
+* **DER Installed**: 8 unresolved feeders (utility1), 202 unresolved feeders (utility2)
+* **DER Planned**: 345 unresolved feeders (utility1), 574 unresolved feeders (utility2)
+* **Circuits**: 269 feeders with capacity data (utility1), no data quality issues
 
 ---
 
-### Gold Layer (Business-Ready + Historical Tracking)
+### Gold Layer (Business-Ready + Historical Tracking) ✅ COMPLETE
 **Purpose**: API-optimized aggregates and SCD Type 2 history
 
 **Tables:**
 * `gold.circuits_current` - SCD Type 2 for feeder capacity history
 * `gold.der_installed_current` - SCD Type 2 for DER state tracking
+* `gold.der_planned_current` - SCD Type 2 for DER planning queue history
 * `gold.feeders_with_capacity` - Pre-aggregated: feeders with available capacity (current view)
 * `gold.feeder_der_summary` - Pre-aggregated: all DER per feeder (current view)
-* `gold.data_quality_metrics` - Observability (time-series tracking)
 
 **Key Features:**
-* **SCD Type 2**: Track capacity changes over time via DLT's `APPLY CHANGES INTO`
-  - `circuits_current`: KEY = `feeder_id`, SEQUENCE BY `hca_refresh_date`
-  - `der_installed_current`: KEY = `(der_id, der_type)`, SEQUENCE BY `ingestion_timestamp`
-  - Reads current records from Silver (`WHERE __IS_CURRENT = TRUE` conceptually)
+* **SCD Type 2**: Track capacity changes over time via DLT's Auto CDC (`dp.create_auto_cdc_flow`)
+  - `circuits_current`: KEY = `(feeder_id, utility_id)`, SEQUENCE BY `hca_refresh_date`
+  - `der_installed_current`: KEY = `(der_id, utility_id)`, SEQUENCE BY `ingestion_date`
+  - `der_planned_current`: KEY = `(der_id, utility_id)`, SEQUENCE BY `ingestion_date`
+  - **Current records identified by `__END_AT IS NULL`** (NOT `__IS_CURRENT` column)
+  - Temporal columns: `__START_AT`, `__END_AT` (NULL = current)
 * **API-Optimized Current Views**: No SCD2 columns, simple queries for API
 * **Liquid Clustering** optimized for query patterns:
-  - `feeders_with_capacity`: `CLUSTER BY utility_id, available_capacity_mw DESC`
-  - `feeder_der_summary`: `CLUSTER BY feeder_id, utility_id`
-  - `circuits_current`: `CLUSTER BY utility_id, feeder_id, __END_AT`
-  - `data_quality_metrics`: `CLUSTER BY metric_date, utility_id`
+  - `circuits_current`: `CLUSTER BY [utility_id, feeder_id]`
+  - `der_installed_current`: `CLUSTER BY [utility_id, feeder_id]`
+  - `der_planned_current`: `CLUSTER BY [utility_id, feeder_id]`
+  - `feeders_with_capacity`: `CLUSTER BY [utility_id, feeder_id]`
+  - `feeder_der_summary`: `CLUSTER BY [feeder_id, utility_id]`
+* **Multi-tenant safe**: All SCD2 keys include `utility_id` to prevent cross-utility collisions
+* **Runtime-resilient helpers**: `filter_current()` handles case-insensitive column matching
 
 ---
 
 ## 🔑 Key Design Decisions
 
-### 1. Partitioning + Clustering Strategy by Layer
-
-**Bronze Layer: Partitioning + Clustering**
-```
-PARTITION BY ingestion_date + CLUSTER BY utility_id
-```
+### 1. No Partitioning or Clustering at Bronze
+**Decision**: Bronze tables have no partitioning or clustering
 
 **Rationale:**
-* **Partitioning** = Lifecycle management
-  - Low cardinality (one partition per day/month)
-  - Simple retention: `ALTER TABLE DROP PARTITION WHERE ingestion_date < '2023-01-01'`
-  - Physical isolation for compliance/regulatory needs
-* **Clustering** = Query performance
-  - Clustering happens **within each partition** on `utility_id`
-  - Optimizes common query pattern: `WHERE ingestion_date = '...' AND utility_id = '...'`
-  - Moderate cardinality (~8 utilities) works well with clustering
+* **Computed columns limitation**: `utility_id` is extracted from file path, not in source CSV schema
+* Delta Liquid Clustering requires columns to have statistics in the source schema
+* **Append-only streaming**: Bronze is write-optimized, not query-optimized
+* **Optimization deferred**: Silver and Gold layers apply clustering where columns are materialized
+* **Simplicity**: Avoid partition/cluster conflicts during schema evolution
 
-**Silver/Gold Layers: Pure Liquid Clustering**
-```
-CLUSTER BY utility_id, feeder_id, der_type  (Silver)
-CLUSTER BY <query-pattern-specific>         (Gold)
-```
-
-**Rationale:**
-* **No partitioning** - Avoid 50K+ partitions on `feeder_id`
-* **Flexibility** - Liquid clustering adapts to changing query patterns
-* **Multi-dimensional** - Efficiently handles queries filtering on any combination of columns
-* **No lifecycle needs** - Silver/Gold keep all history, no regular partition drops
-
-**Why This Hybrid Approach?**
-* Each layer uses the strategy that fits its use case:
-  - **Bronze** = Lifecycle-focused (partitioning) + performance (clustering)
-  - **Silver/Gold** = Pure query optimization (liquid clustering)
-* Not mixing strategies **within** a layer, but **across** layers based on requirements
+**Result**: Bronze is pure raw storage; optimization happens downstream
 
 ---
 
@@ -117,33 +114,43 @@ CLUSTER BY <query-pattern-specific>         (Gold)
 * **Gold**: SCD Type 2 tracks changes over time
   - Reads Silver's current data
   - Maintains historical records for trend analysis
-  - API views query Gold current records (no `__END_AT` filtering needed)
+  - API views query Gold current records using `__END_AT IS NULL`
 
-### 3. Lineage & Run Tracking
+### 3. SCD2 Key Design
+**Multi-tenant safety**: All SCD2 keys include `utility_id`
+* Prevents collisions when different utilities use the same native IDs
+* Example: `utility1_1000` vs `utility2_1000` are distinct DER projects
+* Keys: `(feeder_id, utility_id)` for circuits, `(der_id, utility_id)` for DER
+
+**Why composite keys?**
+* Native IDs (e.g., `ProjectID`) are not globally unique across utilities
+* `utility_id` prefix in `feeder_id`/`der_id` provides uniqueness
+* SCD2 tracking requires utility_id in KEYS to prevent state corruption
+
+### 4. Lineage & Run Tracking
 Every table includes:
-* `pipeline_id` - Static pipeline UUID
-* `pipeline_update_id` - **Primary run identifier** (DLT's `update_id`)
+* `pipeline_update_id` - **Primary run identifier** (format: `run_YYYYMMDD_HHmmss_<hash>`)
 * `ingestion_timestamp` - Record-level timestamp
-* `ingestion_date` - Date column for time-based filtering and partitioning (Bronze)
-* `batch_id` - Microbatch identifier
-* `source_file` - Source file path
-* `file_hash` - File-level deduplication
-* `record_hash` - Row-level SCD detection (Gold only)
+* `ingestion_date` - Date column for time-based filtering
+* `source_file` - Source file path (Bronze only)
+* `file_signature` - File-level deduplication (Bronze only)
 
 **Why `pipeline_update_id`?**
 * Available via `spark.conf.get("pipelines.update_id")`
 * Links records → runs → DLT event logs → source files
 * Enables lineage, debugging, rollback, and idempotency
 
-### 4. Schema Evolution Strategy
+### 5. Schema Evolution Strategy
 * **Bronze**: All STRING columns, preserve raw source fidelity
-* Auto Loader schema inference with evolution enabled
+* Auto Loader schema inference with evolution enabled (`addNewColumns` mode)
 * **Silver**: Mapping layer handles heterogeneous schemas across utilities
+* **Strict schema alignment**: `unionByName(allowMissingColumns=False)` catches drift
 
-### 5. Heterogeneous Source Handling
+### 6. Heterogeneous Source Handling
 **Utility 1** (Wide, Segment-Level):
 * Circuits: Segment rows → aggregated to feeder (MAX capacity, not SUM)
-* DER: Wide format (SolarPV_kW, Wind_kW) → unpivoted to narrow (der_type, capacity_kw)
+* DER: Wide format (14 one-hot tech columns: SolarPV, Wind, etc.) → unpivoted to narrow
+* DER: Add `interconnection_queue_id` as NULL to match utility2's 11-column schema
 
 **Utility 2** (Narrow, Feeder-Level):
 * Already feeder-level, narrow DER format
@@ -156,17 +163,17 @@ Every table includes:
 ## 📊 Data Flow
 
 ```
-Source CSV Files (Landing Zone: /Volumes/.../landing/)
+Source CSV Files (Landing Zone: /Volumes/dev_iedr/bronze/landing/)
          ↓
-    [Auto Loader - Incremental]
+    [Auto Loader - Incremental, No Clustering]
          ↓
-Bronze Layer (Raw, STRING columns, partitioned by date, clustered by utility)
+Bronze Layer (Raw, STRING columns, no partitioning/clustering)
          ↓
   [Standardization, Segment→Feeder, Unpivot, Quality Checks]
          ↓
-Silver Layer (Full-Refresh, Feeder-level, Normalized DER types, liquid clustering)
+Silver Layer (Full-Refresh, Feeder-level, Normalized DER types, no clustering)
          ↓
-  [SCD Type 2, Aggregation, Business Logic]
+  [SCD Type 2, Aggregation, Business Logic, Liquid Clustering]
          ↓
 Gold Layer (Historical + API-ready current views, liquid clustering)
          ↓
@@ -184,107 +191,165 @@ FROM gold.feeders_with_capacity
 WHERE available_capacity_mw > 5.0
 ORDER BY available_capacity_mw DESC;
 ```
-**Optimization**: `CLUSTER BY utility_id, available_capacity_mw DESC`
+**Optimization**: `CLUSTER BY [utility_id, feeder_id]`
 
 ### Query 2: Get all DER for a specific feeder
 ```sql
 SELECT * FROM gold.feeder_der_summary
-WHERE feeder_id = '1105354';
+WHERE feeder_id = 'utility1_1105354';
 ```
-**Optimization**: `CLUSTER BY feeder_id, utility_id`
+**Optimization**: `CLUSTER BY [feeder_id, utility_id]`
 
 ### Query 3: Temporal query - capacity history
 ```sql
 SELECT feeder_id, max_hosting_capacity_mw, __START_AT, __END_AT
 FROM gold.circuits_current
-WHERE feeder_id = '1105354'
+WHERE feeder_id = 'utility1_1105354'
+  AND __END_AT IS NULL  -- Current records only
 ORDER BY __START_AT DESC;
 ```
-**Optimization**: `CLUSTER BY utility_id, feeder_id, __END_AT`
+**Optimization**: `CLUSTER BY [utility_id, feeder_id]`
 
-### Query 4: Retention/Cleanup (Bronze Layer)
+### Query 4: Point-in-time historical query
 ```sql
--- Simple partition drop for retention (Bronze only)
-ALTER TABLE bronze.circuits_raw 
-DROP IF EXISTS PARTITION (ingestion_date < '2023-01-01');
+SELECT feeder_id, max_hosting_capacity_mw
+FROM gold.circuits_current
+WHERE feeder_id = 'utility1_1105354'
+  AND __START_AT <= '2024-01-15'
+  AND (__END_AT > '2024-01-15' OR __END_AT IS NULL);
 ```
 
 ---
 
 ## 🛠️ Implementation Phases
 
-### Phase 1: Foundation
-* Set up Unity Catalogs (dev_iedr, prod_iedr)
-* Create schemas (bronze, silver, gold)
-* Configure landing volumes
+### Phase 1: Foundation ✅ COMPLETE
+* Set up Unity Catalogs (`dev_iedr`)
+* Create schemas (`bronze`, `ny_iedr` for silver/gold)
+* Configure landing volumes (`dev_iedr.bronze.landing`, `dev_iedr.bronze.metadata`)
 * Establish project folder structure
 
-### Phase 2: Bronze Layer
-* Upload sample CSVs to landing zone
-* Develop `helpers.py` (lineage utilities: `get_update_id()`, `get_file_hash()`)
+### Phase 2: Bronze Layer ✅ COMPLETE
+* Upload CSVs to landing zone (`/Volumes/dev_iedr/bronze/landing/{utility_id}/`)
+* Develop `helpers.py` (lineage utilities)
 * Build DLT pipeline `01_bronze_ingestion.py`:
   - `circuits_raw`, `der_installed_raw`, `der_planned_raw`, `file_tracking`
-  - All with lineage columns and partitioning + clustering
+  - All with lineage columns (no partitioning/clustering)
+* **Data ingested**: 66,448 circuit records, 72,346 DER records
 
 ### Phase 3: Silver Layer ✅ COMPLETE
 * Develop `schema_normalization.py` (utility-specific transformations)
 * Transform and standardize circuit and DER data
-* Aggregate segments → feeders
-* Unpivot wide formats → narrow
+* Aggregate segments → feeders (utility1)
+* Unpivot wide formats → narrow (utility1 DER)
 * Enforce data quality expectations
+* Add `interconnection_queue_id` to utility1 for schema alignment
 * **Unit tests**: `test_schema_normalization.py` (20+ test cases)
 
-### Phase 4: Gold Layer (TO BE IMPLEMENTED)
-* Develop SCD Type 2 history tables via `APPLY CHANGES INTO`
+### Phase 4: Gold Layer ✅ COMPLETE
+* Develop SCD Type 2 history tables via Auto CDC (`dp.create_auto_cdc_flow`)
 * Create API-optimized current views (no SCD2 columns)
 * Apply liquid clustering for query patterns
-* Track data quality metrics
+* Fix `filter_current()` helper to use `__END_AT IS NULL` (not `__IS_CURRENT`)
+* Track data quality metrics (unresolved feeders, null keys)
+* **SCD2 multi-tenant keys**: Include `utility_id` in all composite keys
 
-### Phase 5: Testing & Production
-* Integration tests for full Bronze → Gold pipeline
-* Data quality validation dashboards
-* Deploy to prod_iedr
-* Schedule pipelines
-* Set up monitoring
+### Phase 5: Testing & Production (IN PROGRESS)
+* ✅ End-to-end pipeline validation
+* ✅ Data quality validation (DQ metrics table operational)
+* 🔲 Integration tests for full Bronze → Gold pipeline
+* 🔲 Deploy to `prod_iedr`
+* 🔲 Schedule pipelines
+* 🔲 Set up monitoring dashboards
 
 ---
 
 ## 📈 Scalability Considerations
 
-* **Current Scale**: 8 utilities, ~50K feeders, ~5M DER projects
+* **Current Scale**: 2 utilities (utility1, utility2), 269 feeders, ~72K DER projects
+* **Future Scale**: 8 utilities, ~50K feeders, ~5M DER projects
 * **Auto Loader**: Handles incremental file arrivals efficiently
-* **Bronze Partitioning**: Low cardinality (daily/monthly), simple lifecycle management
 * **Liquid Clustering**: Adapts to data skew across utilities automatically
 * **SCD Type 2 (Gold)**: Manages historical growth without performance degradation
+* **Multi-tenant architecture**: Scales horizontally as utilities onboard
 
 ---
 
 ## 📊 Data Quality Strategy
 
-* **Bronze**: Minimal expectations (valid file structure, non-empty)
+* **Bronze**: Minimal expectations (valid file structure, schema drift detection)
 * **Silver**: Enforce expectations with `@dlt.expect_or_drop`:
-  - `valid_feeder_id`: NOT NULL
-  - `valid_utility_id`: NOT NULL
-  - `valid_der_type`: NOT NULL
-* **Gold**: Completeness metrics tracked in `data_quality_metrics` table
+  - `valid_feeder_id`: NOT NULL (circuits only)
+  - `valid_utility_id`: NOT NULL (all tables)
+  - `valid_hca_refresh_date`: NOT NULL (circuits, required for SCD2)
+  - `valid_der_type`: NOT NULL (DER tables)
+* **Unresolved DER preserved**: `feeder_id IS NULL` records pass through for tracking
+* **Gold**: Completeness metrics tracked in `data_quality_metrics_silver` table
+  - Total records, null key counts, unresolved feeder counts, negative capacity counts
+
+**Current DQ Metrics (2026-07-05 run):**
+* Circuits: 0 null keys, 0 negative capacities, 0 unresolved feeders
+* DER Installed: 0 null keys, 210 unresolved feeders (8 utility1, 202 utility2)
+* DER Planned: 0 null keys, 919 unresolved feeders (345 utility1, 574 utility2)
 
 ---
 
 ## 🔍 Monitoring & Observability
 
 * **DLT Event Logs**: Track pipeline runs, errors, data quality metrics
-* **Data Quality Dashboard**: Query `gold.data_quality_metrics`
+* **Data Quality Dashboard**: Query `gold.data_quality_metrics_silver` for trends
 * **Pipeline Update ID**: Trace every record to originating run
-* **File Tracking**: Idempotency and deduplication audit trail
+* **File Tracking**: Idempotency and deduplication audit trail (`file_tracking` table)
+* **SCD2 History**: Temporal queries via `__START_AT` and `__END_AT`
 
 ---
 
 ## 🚀 Technology Stack
 
-* **Platform**: Databricks (Unity Catalog)
-* **Orchestration**: Delta Live Tables (DLT)
+* **Platform**: Databricks (Unity Catalog, Serverless, Photon enabled)
+* **Orchestration**: Lakeflow Spark Declarative Pipelines (SDP, formerly DLT)
 * **Storage**: Delta Lake with Liquid Clustering
 * **Ingestion**: Auto Loader (cloudFiles)
-* **Languages**: Python (PySpark), SQL
-* **Version Control**: Git (GitHub)
+* **Languages**: Python (PySpark)
+* **Version Control**: Git (GitHub repository: `ny-iedr-data-platform`)
 * **Testing**: pytest + PySpark (unit tests for transformations)
+* **Pipeline Mode**: Triggered (not continuous)
+* **Edition**: ADVANCED (required for SCD2 and Auto CDC)
+
+---
+
+## 🎓 Lessons Learned
+
+### 1. Clustering Requires Materialized Columns
+* **Problem**: Cannot cluster by computed columns (`utility_id`) at Bronze ingestion
+* **Solution**: Defer clustering to Silver/Gold where columns are materialized
+* **Result**: Bronze is pure raw storage; optimization happens downstream
+
+### 2. Partitioning + Clustering Conflicts
+* **Problem**: Delta tables cannot have both partitioning AND clustering
+* **Solution**: Choose one strategy per layer based on use case
+* **Result**: Bronze has neither, Gold uses liquid clustering only
+
+### 3. SCD2 Metadata Column Names
+* **Problem**: Assumed `__IS_CURRENT` column exists; SCD2 only provides `__START_AT`/`__END_AT`
+* **Solution**: Use `__END_AT IS NULL` to identify current records
+* **Result**: `filter_current()` helper correctly filters for API views
+
+### 4. Multi-tenant Key Design
+* **Problem**: Native IDs collide across utilities (both have `ProjectID = 1000`)
+* **Solution**: Include `utility_id` in all SCD2 composite keys
+* **Result**: No state corruption, safe concurrent updates
+
+### 5. Schema Alignment Strictness
+* **Problem**: `allowMissingColumns=True` masks schema drift
+* **Solution**: Use `allowMissingColumns=False` and add missing columns explicitly
+* **Result**: Schema bugs surface immediately (caught `interconnection_queue_id` mismatch)
+
+---
+
+## 📚 References
+
+* [Databricks SDP (DLT) Documentation](https://docs.databricks.com/en/delta-live-tables/index.html)
+* [Delta Lake Liquid Clustering](https://docs.databricks.com/en/delta/clustering.html)
+* [Auto Loader](https://docs.databricks.com/en/ingestion/auto-loader/index.html)
+* [Unity Catalog](https://docs.databricks.com/en/data-governance/unity-catalog/index.html)
