@@ -31,6 +31,15 @@
 
 ### Silver Layer (dev_iedr.silver)
 **Purpose**: Standardize schemas, enforce quality, create common data model
+**N-Utility Registry Pattern:**
+* **Utility Registry** (`pipelines/utils/utility_registry.py`): Configuration-driven utility onboarding
+  - Each utility defines 3 transformer functions (circuits, der_installed, der_planned)
+  - Register new utilities via `UTILITY_REGISTRY` dict without changing pipeline code
+  - `get_registered_utilities()` returns all active utilities dynamically
+  - **To onboard utility3**: Write 3 transformer functions, add to registry, done
+* **Dynamic Processing**: Silver pipeline loops over registered utilities automatically
+  - No hardcoded utility IDs in pipeline code
+  - Scalable to N utilities without architectural changes
 
 **Tables:**
 * `dev_iedr.silver.circuits_standardized` - Feeder-level circuits (full-refresh snapshots)
@@ -116,6 +125,27 @@
   - Maintains historical records for trend analysis
   - API views query Gold current records using `__END_AT IS NULL`
 
+### 3. N-Utility Registry Pattern
+**Decision**: Configuration-driven utility onboarding via registry pattern
+
+**Rationale:**
+* **Scalability**: Adding utility3 requires zero changes to pipeline code
+* **Separation of concerns**: Utility-specific logic lives in registry, not pipeline
+* **Maintainability**: Each utility's transformations are self-contained functions
+* **Testing**: Transformer functions can be unit tested in isolation
+
+**Implementation:**
+```python
+# pipelines/utils/utility_registry.py
+UTILITY_REGISTRY = {
+    1: UtilityConfig(
+        circuits_transformer=transform_utility1_circuits,
+        der_installed_transformer=transform_utility1_der_installed,
+        der_planned_transformer=transform_utility1_der_planned
+    ),
+    2: UtilityConfig(...)  # Add more utilities here
+}
+```
 ### 3. SCD2 Key Design
 **Multi-tenant safety**: All SCD2 keys include `utility_id`
 * Prevents collisions when different utilities use the same native IDs
@@ -163,15 +193,15 @@ Every table includes:
 ## 📊 Data Flow
 
 ```
-Source CSV Files (Landing Zone: /Volumes/dev_iedr/bronze/landing/)
-         ↓
-    [Auto Loader - Incremental, No Clustering]
-         ↓
 Bronze Layer (Raw, STRING columns, no partitioning/clustering)
+         ↓
+  [N-Utility Registry → Dynamic Transformations per Utility]
          ↓
   [Standardization, Segment→Feeder, Unpivot, Quality Checks]
          ↓
 Silver Layer (Full-Refresh, Feeder-level, Normalized DER types, no clustering)
+         ↓ (skipChangeCommits for streaming reads)
+  [SCD Type 2, Aggregation, Business Logic, Liquid Clustering]
          ↓
   [SCD Type 2, Aggregation, Business Logic, Liquid Clustering]
          ↓
@@ -239,11 +269,16 @@ WHERE feeder_id = 'utility1_1105354'
 
 ### Phase 3: Silver Layer ✅ COMPLETE
 * Develop `schema_normalization.py` (utility-specific transformations)
+* **Implement N-utility registry pattern** (`utility_registry.py`)
+  - Configuration-driven utility onboarding
+  - Dynamic utility processing loop in Silver pipeline
+  - Scalable to N utilities without code changes
 * Transform and standardize circuit and DER data
 * Aggregate segments → feeders (utility1)
 * Unpivot wide formats → narrow (utility1 DER)
 * Enforce data quality expectations
 * Add `interconnection_queue_id` to utility1 for schema alignment
+* **Fix skipChangeCommits**: DQ metrics streaming reads handle full-refresh overwrites
 * **Unit tests**: `test_schema_normalization.py` (20+ test cases)
 
 ### Phase 4: Gold Layer ✅ COMPLETE
@@ -257,6 +292,7 @@ WHERE feeder_id = 'utility1_1105354'
 ### Phase 5: Testing & Production (IN PROGRESS)
 * ✅ End-to-end pipeline validation
 * ✅ Data quality validation (DQ metrics table operational)
+* ✅ N-utility registry pattern implemented and tested
 * 🔲 Integration tests for full Bronze → Gold pipeline
 * 🔲 Deploy to `prod_iedr`
 * 🔲 Schedule pipelines
@@ -344,6 +380,16 @@ WHERE feeder_id = 'utility1_1105354'
 * **Problem**: `allowMissingColumns=True` masks schema drift
 * **Solution**: Use `allowMissingColumns=False` and add missing columns explicitly
 * **Result**: Schema bugs surface immediately (caught `interconnection_queue_id` mismatch)
+
+### 6. N-Utility Scalability Pattern
+* **Problem**: Hardcoded utility IDs in pipeline code → architectural changes for each new utility
+* **Solution**: Registry pattern with dynamic utility processing loop
+* **Result**: Onboard utilities via configuration, not code changes
+
+### 7. Full-Refresh + Streaming Reads
+* **Problem**: Silver full-refresh creates change commits that downstream streaming reads reject
+* **Solution**: Use `spark.readStream.option("skipChangeCommits", "true")` for DQ metrics
+* **Result**: Incremental pipeline runs succeed without full refresh
 
 ---
 
