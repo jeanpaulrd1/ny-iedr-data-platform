@@ -45,6 +45,20 @@ from pyspark.sql import functions as F
 # GOLD TABLE: CIRCUITS CURRENT (SCD Type 2)
 # ==============================================================================
 
+@dlt.table(name="dev_iedr.gold._circuits_stream")
+def _circuits_stream():
+    """Intermediate streaming source with skipChangeCommits.
+    
+    Silver circuits_standardized uses full-refresh (overwrite mode), which produces
+    change commits that break downstream streaming reads. This intermediate table
+    enables skipChangeCommits so APPLY CHANGES can safely stream from full-refresh Silver.
+    """
+    return (
+        spark.readStream
+        .option("skipChangeCommits", "true")
+        .table("dev_iedr.silver.circuits_standardized")
+    )
+
 dlt.create_target_table(
     name="dev_iedr.gold.circuits_current",
     comment="SCD Type 2 history of feeder capacity changes - tracks max/min hosting capacity over time",
@@ -56,7 +70,7 @@ dlt.create_target_table(
 
 dlt.apply_changes(
     target="dev_iedr.gold.circuits_current",
-    source="dev_iedr.silver.circuits_standardized",
+    source="dev_iedr.gold._circuits_stream",  # Read from skipChangeCommits stream
     keys=["utility_id", "feeder_id"],
     sequence_by="hca_refresh_date",
     stored_as_scd_type=2,
@@ -81,6 +95,15 @@ dlt.apply_changes(
 # GOLD TABLE: DER INSTALLED CURRENT (SCD Type 2)
 # ==============================================================================
 
+@dlt.table(name="dev_iedr.gold._der_installed_stream")
+def _der_installed_stream():
+    """Intermediate streaming source with skipChangeCommits for DER installed."""
+    return (
+        spark.readStream
+        .option("skipChangeCommits", "true")
+        .table("dev_iedr.silver.der_installed_standardized")
+    )
+
 dlt.create_target_table(
     name="dev_iedr.gold.der_installed_current",
     comment="SCD Type 2 history of installed DER projects - tracks installations and capacity changes",
@@ -92,7 +115,7 @@ dlt.create_target_table(
 
 dlt.apply_changes(
     target="dev_iedr.gold.der_installed_current",
-    source="dev_iedr.silver.der_installed_standardized",
+    source="dev_iedr.gold._der_installed_stream",  # Read from skipChangeCommits stream
     keys=["utility_id", "der_id", "der_type"],
     # utility_id: explicit multi-tenant key to prevent DER ID collisions across utilities
     # der_id: project identifier
@@ -119,6 +142,15 @@ dlt.apply_changes(
 # GOLD TABLE: DER PLANNED CURRENT (SCD Type 2)
 # ==============================================================================
 
+@dlt.table(name="dev_iedr.gold._der_planned_stream")
+def _der_planned_stream():
+    """Intermediate streaming source with skipChangeCommits for DER planned."""
+    return (
+        spark.readStream
+        .option("skipChangeCommits", "true")
+        .table("dev_iedr.silver.der_planned_standardized")
+    )
+
 dlt.create_target_table(
     name="dev_iedr.gold.der_planned_current",
     comment="SCD Type 2 history of planned DER projects - tracks queue status and planned installation dates",
@@ -130,7 +162,7 @@ dlt.create_target_table(
 
 dlt.apply_changes(
     target="dev_iedr.gold.der_planned_current",
-    source="dev_iedr.silver.der_planned_standardized",
+    source="dev_iedr.gold._der_planned_stream",  # Read from skipChangeCommits stream
     keys=["utility_id", "der_id", "der_type"],
     sequence_by="ingestion_date",
     stored_as_scd_type=2,
