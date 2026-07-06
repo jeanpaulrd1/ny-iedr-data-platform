@@ -209,7 +209,7 @@ def file_tracking():
     Auto Loader prevents re-processing the same file in subsequent runs.
     """
     # Union file metadata from all three bronze tables
-    circuits = dlt.read_stream("circuits_raw").select(
+    circuits = dlt.read_stream("dev_iedr.bronze.circuits_raw").select(
         F.col("source_file").alias("file_path"),
         F.element_at(F.split(F.col("source_file"), "/"), -1).alias("file_name"),
         F.col("file_signature"),
@@ -220,7 +220,7 @@ def file_tracking():
         F.lit("SUCCEEDED").alias("status")
     )
     
-    der_installed = dlt.read_stream("der_installed_raw").select(
+    der_installed = dlt.read_stream("dev_iedr.bronze.der_installed_raw").select(
         F.col("source_file").alias("file_path"),
         F.element_at(F.split(F.col("source_file"), "/"), -1).alias("file_name"),
         F.col("file_signature"),
@@ -231,7 +231,7 @@ def file_tracking():
         F.lit("SUCCEEDED").alias("status")
     )
     
-    der_planned = dlt.read_stream("der_planned_raw").select(
+    der_planned = dlt.read_stream("dev_iedr.bronze.der_planned_raw").select(
         F.col("source_file").alias("file_path"),
         F.element_at(F.split(F.col("source_file"), "/"), -1).alias("file_name"),
         F.col("file_signature"),
