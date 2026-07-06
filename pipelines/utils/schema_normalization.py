@@ -226,8 +226,16 @@ def map_circuits_to_canonical(df: DataFrame) -> DataFrame:
         F.col("max_hosting_capacity_raw").cast("double").alias("max_hosting_capacity_mw"),
         F.col("min_hosting_capacity_raw").cast("double").alias("min_hosting_capacity_mw"),
         
-        # Parse timestamp (utility-specific formats handled by to_timestamp)
-        F.to_timestamp(F.col("hca_refresh_date_raw")).alias("hca_refresh_date"),
+        # Parse timestamp - utility-specific formats
+        # utility1: "2022-06-30 00:00:00+00:00" (ISO with full timezone)
+        # utility2: "2022/10/01 00:00:00+00" (slashes, short timezone)
+        F.when(
+            F.col("utility_id") == UTILITY1_ID,
+            F.to_timestamp(F.col("hca_refresh_date_raw"), "yyyy-MM-dd HH:mm:ssXXX")
+        ).when(
+            F.col("utility_id") == UTILITY2_ID,
+            F.to_timestamp(F.col("hca_refresh_date_raw"), "yyyy/MM/dd HH:mm:ssX")
+        ).otherwise(None).alias("hca_refresh_date"),
         
         # Pass-through string fields
         F.col("color_code_raw").alias("color_code"),
