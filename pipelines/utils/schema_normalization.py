@@ -24,6 +24,7 @@ places — use the constants defined here.
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+from pyspark.sql.functions import mode
 from pyspark.sql.types import StringType
 from typing import List
 
@@ -46,8 +47,8 @@ def aggregate_utility1_segments(df: DataFrame) -> DataFrame:
     """Aggregate utility 1 segment-level circuits to feeder-level.
     
     Utility 1 reports multiple segment rows per feeder. Aggregate to one feeder row:
-    - MAX(FMAXHC) → max_hosting_capacity_mw (NOT SUM - capacity repeats across segments)
-    - MIN(FMINHC) → min_hosting_capacity_mw
+    - MODE(FMAXHC) → max_hosting_capacity_mw (most common value, immune to outliers)
+    - MODE(FMINHC) → min_hosting_capacity_mw (most common value)
     - SUM(Shape_Length) → total circuit length for the feeder
     - MAX(FHCADATE) → most recent HCA refresh date
     - First non-NULL color code (color repeats, any value is representative)
@@ -68,9 +69,9 @@ def aggregate_utility1_segments(df: DataFrame) -> DataFrame:
         # Native feeder ID (raw circuit ID before prefixing)
         F.first("Circuits_Phase3_CIRCUIT").alias("native_feeder_id"),
         
-        # Hosting capacity fields (use MAX - capacity repeats across segments)
-        F.max("NYHCPV_csv_FMAXHC").alias("max_hosting_capacity_raw"),
-        F.max("NYHCPV_csv_FMINHC").alias("min_hosting_capacity_raw"),
+        # Hosting capacity fields (use MODE - most common value, immune to outliers)
+        mode("NYHCPV_csv_FMAXHC").alias("max_hosting_capacity_raw"),
+        mode("NYHCPV_csv_FMINHC").alias("min_hosting_capacity_raw"),
         
         # Voltage (repeats across segments, any value is representative)
         F.first("NYHCPV_csv_FVOLTAGE").alias("voltage_kv_raw"),

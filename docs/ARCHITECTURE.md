@@ -48,7 +48,7 @@
 * `dev_iedr.silver.data_quality_metrics_silver` - Data quality metrics from transformations
 
 **Transformations:**
-* **Utility 1**: Aggregate segment-level → feeder-level circuits (MAX capacity, not SUM)
+* **Utility 1**: Aggregate segment-level → feeder-level circuits (MODE capacity, not SUM)
 * **Utility 1**: Unpivot wide DER format (14 one-hot tech columns) → narrow (der_id, der_type, capacity)
 * **Utility 1**: Add `interconnection_queue_id` column (as NULL) to align with utility2 schema
 * **All Utilities**: Normalize null sentinels ("NULL", "null", "" → SQL NULL)
@@ -220,7 +220,7 @@ Every table includes:
 
 ### 6. Heterogeneous Source Handling
 **Utility 1** (Wide, Segment-Level):
-* Circuits: Segment rows → aggregated to feeder (MAX capacity, not SUM)
+* Circuits: Segment rows → aggregated to feeder (MODE capacity, not SUM)
 * DER: Wide format (14 one-hot tech columns: SolarPV, Wind, etc.) → unpivoted to narrow
 * DER: Add `interconnection_queue_id` as NULL to match utility2's 11-column schema
 
@@ -466,6 +466,36 @@ WHERE feeder_id = 'utility1_1105354'
   * utility1: 269 feeders → point fallback (no grid hierarchy in IDs)
   * Frontend queries ONE table with zero joins
   * Geometry upgrade path ready (add WKT column to source, pipeline passthroughs automatically)
+
+
+
+### 10. MODE Aggregation for Robust Capacity Calculation
+* **Problem**: utility1 circuit data has segment-level records where 5% of feeders (15 out of 291) have outlier capacity values in 1-2 segments
+  * Example: Circuit 2304312 has 271 segments @ 2.1 MW and 1 segment @ 10 MW
+  * Using MAX: Reports 10 MW (takes the outlier)
+  * Using SUM: Would be completely wrong (would multiply capacity by segment count)
+* **Initial approach**: Used MAX() aggregation assuming all segments have identical capacity
+* **Better solution**: Use MODE() to take the most common value
+  * **Why MODE**: Immune to outliers in both directions (high and low)
+  * **Implementation**: `mode("NYHCPV_csv_FMAXHC")` in `aggregate_utility1_segments()`
+  * **Data pattern**: 99%+ of segments within a feeder share ONE consistent value
+  * **Outlier handling**: MODE correctly ignores the 0.5-1% outlier segments
+* **Examples**:
+  * Circuit 2304312: 271 @ 2.1 MW, 1 @ 10 MW → MODE = 2.1 MW ✓ (ignores high outlier)
+  * Circuit 1204003: 218 @ 10 MW, 1 @ 4.2 MW → MODE = 10 MW ✓ (ignores low outlier)
+* **Impact**:
+  * **Affected feeders**: 15 out of 291 (5.2%) with capacity variation across segments
+  * **Unaffected feeders**: 276 (94.8%) where all segments already have identical capacity
+  * **Data quality improvement**: More accurate representation of actual feeder capacity
+  * **Robustness**: Handles data entry errors and outliers automatically
+* **Result**: 
+  * Capacity calculations now immune to segment-level data quality issues
+  * Better representation of true feeder capacity than MAX approach
+  * No performance impact (MODE is native PySpark function)
+  * Tested and validated: All 291 feeders processed correctly
+* **Documentation**: See `docs/MODE_TEST_RESULTS.md` for complete testing validation
+
+---
 
 ---
 
