@@ -85,6 +85,8 @@ dlt.apply_changes(
         "max_hosting_capacity_mw",
         "min_hosting_capacity_mw",
         "color_code",
+        "color_hex",  # Standardized hex code (e.g. #F96A0D)
+        "color_name",  # Extracted color name (e.g. ORANGE)
         "shape_length"
         # Note: utility_id is in keys, not track_history (keys are always tracked)
     ]
