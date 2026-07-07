@@ -11,7 +11,7 @@ UTILITY ID NAMING CONTRACT:
 utility_id values are extracted from the landing zone directory name by
 extract_utility_id_from_path() in helpers.py. The directory structure is:
   /Volumes/.../landing/{utility_id}/circuits/
-
+ 
 This means the landing directories MUST be named without underscores:
   utility1/   →  utility_id = "utility1"
   utility2/   →  utility_id = "utility2"
@@ -222,6 +222,18 @@ def map_circuits_to_canonical(df: DataFrame) -> DataFrame:
     Returns:
         DataFrame with canonical schema, ready for SCD2 tracking
     """
+    # Mapping for utility2 simple color names to standard hex codes
+    utility2_color_map = F.create_map([
+        F.lit("blue"), F.lit("#0070C0"),
+        F.lit("brown"), F.lit("#953736"),
+        F.lit("dark blue"), F.lit("#003366"),
+        F.lit("green"), F.lit("#13B157"),
+        F.lit("light blue"), F.lit("#13AFED"),
+        F.lit("red"), F.lit("#F6130F"),
+        F.lit("turquoise"), F.lit("#40E0D0"),
+        F.lit("yellow"), F.lit("#FFF525"),
+    ])
+    
     return df.select(
         "feeder_id",
         "utility_id",
@@ -243,8 +255,32 @@ def map_circuits_to_canonical(df: DataFrame) -> DataFrame:
             F.to_timestamp(F.col("hca_refresh_date_raw"), "yyyy/MM/dd HH:mm:ssX")
         ).otherwise(None).alias("hca_refresh_date"),
         
-        # Pass-through string fields
+        # Pass-through raw color code
         F.col("color_code_raw").alias("color_code"),
+        
+        # COLOR STANDARDIZATION: Extract hex code and color name
+        # utility1 format: "0.00 TO 0.29 BROWN-953736" → hex: #953736, name: BROWN
+        # utility2 format: "blue" → hex: #0070C0 (mapped), name: BLUE
+        F.when(
+            # utility1: Has dash and hex pattern
+            F.col("color_code_raw").contains("-"),
+            F.concat(F.lit("#"), F.regexp_extract(F.col("color_code_raw"), r"-([0-9A-Fa-f]{6})$", 1))
+        ).otherwise(
+            # utility2: Lookup in map, default to gray if not found
+            F.coalesce(
+                utility2_color_map[F.lower(F.trim(F.col("color_code_raw")))],
+                F.lit("#808080")  # Gray fallback for unknown colors
+            )
+        ).alias("color_hex"),
+        
+        F.when(
+            # utility1: Extract color name (word before the dash)
+            F.col("color_code_raw").contains("-"),
+            F.upper(F.regexp_extract(F.col("color_code_raw"), r"\s([A-Za-z\s]+)-[0-9A-Fa-f]{6}$", 1))
+        ).otherwise(
+            # utility2: Use the color_code as-is, uppercase
+            F.upper(F.trim(F.col("color_code_raw")))
+        ).alias("color_name"),
         
         # Shape length (already aggregated for utility1, native for utility2) - cast to double
         F.col("shape_length_raw").cast("double").alias("shape_length"),
@@ -338,3 +374,27 @@ def map_der_to_canonical(df: DataFrame, der_table_type: str) -> DataFrame:
         canonical = canonical.drop("planned_installation_date_raw")
  
     return canonical
+
+
+def normalize_null_sentinels(df: DataFrame, string_columns: List[str]) -> DataFrame:
+    """Normalize NULL sentinels ("NULL", "null", "", etc.) to SQL NULL.
+    
+    Args:
+        df: DataFrame with potential NULL sentinels
+        string_columns: List of STRING column names to normalize
+        
+    Returns:
+        DataFrame with normalized NULLs
+    """
+    for col in string_columns:
+        if col in df.columns:
+            df = df.withColumn(
+                col,
+                F.when(
+                    (F.col(col).isNull()) |
+                    (F.trim(F.col(col)) == "") |
+                    (F.upper(F.trim(F.col(col))) == "NULL"),
+                    None
+                ).otherwise(F.col(col))
+            )
+    return df
