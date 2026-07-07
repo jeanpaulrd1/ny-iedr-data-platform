@@ -256,3 +256,106 @@ def feeder_der_summary():
     )
     
     return result
+
+
+# ==============================================================================
+# GOLD VIEW: FEEDER MAP LAYER (Map Renderer)
+# ==============================================================================
+
+@dlt.table(
+    name="dev_iedr.gold.feeder_map_layer",
+    comment="Denormalized feeder data for map rendering - single query, zero joins required",
+    table_properties={
+        "delta.enableChangeDataFeed": "true",
+        "quality": "gold"
+    },
+    cluster_by=["utility_id", "grid_area_code"]
+)
+def feeder_map_layer():
+    """Purpose-built table for map rendering - all data in one query.
+    
+    Combines circuits_current + feeder_der_summary with geospatial fields.
+    Map renderer queries this table with:
+      WHERE utility_id = ? AND grid_area_code IN (...)
+    
+    Returns one row per feeder with ALL data needed to render:
+    - Visual properties (color, capacity for heatmap)
+    - DER counts (icon badges from feeder_der_summary)
+    - Grid hierarchy (district grouping fallback)
+    - Geometry (WKT LineString when available)
+    - Map render level (geometry/district/point_fallback)
+    
+    Liquid Clustering: (utility_id, grid_area_code)
+    - Optimizes for multi-tenant filtering and district-level zoom
+    - Handles skew automatically (utility2 has 1909 feeders, utility1 has 269)
+    
+    Current-Only: Filters to __END_AT IS NULL (no historical versions)
+    - Map shows current capacity and DER state only
+    - For historical maps, query circuits_current with __START_AT <= date AND __END_AT > date
+    
+    Returns:
+        DataFrame with all fields needed for map rendering
+    """
+    # Read current circuits
+    circuits = filter_current(dlt.read("dev_iedr.gold.circuits_current"))
+    
+    # Read DER summary (existing feeder_der_summary table with all technology breakdowns)
+    der_summary = dlt.read("dev_iedr.gold.feeder_der_summary")
+    
+    # Join circuits + DER summary (LEFT JOIN - include feeders with zero DER)
+    joined = circuits.join(
+        der_summary,
+        on=["feeder_id", "utility_id"],
+        how="left"
+    )
+    
+    # Select and compute map rendering fields
+    return joined.select(
+        # Identity
+        circuits.feeder_id,
+        circuits.utility_id,
+        circuits.native_feeder_id,
+        
+        # Grid hierarchy (for district grouping fallback when geometry unavailable)
+        # utility2: grid_state_code=36, grid_area_code=13/30/39/etc
+        # utility1: NULLs (no underscore-delimited format)
+        circuits.grid_state_code,
+        circuits.grid_area_code,
+        circuits.grid_circuit_id,
+        
+        # Visual properties
+        circuits.color_code,
+        circuits.max_hosting_capacity_mw,
+        circuits.min_hosting_capacity_mw,
+        
+        # Available capacity calculation (same logic as feeders_with_capacity)
+        (
+            circuits.max_hosting_capacity_mw - 
+            F.coalesce(der_summary.installed_capacity_kw / 1000.0, F.lit(0.0)) -
+            F.coalesce(der_summary.planned_capacity_kw / 1000.0, F.lit(0.0))
+        ).alias("available_capacity_mw"),
+        
+        # DER aggregates (icon badges) - using field names from existing feeder_der_summary
+        F.coalesce(der_summary.installed_count, F.lit(0)).alias("installed_der_count"),
+        F.coalesce(der_summary.planned_count, F.lit(0)).alias("planned_der_count"),
+        F.coalesce(der_summary.installed_capacity_kw, F.lit(0.0)).alias("total_installed_capacity_kw"),
+        F.coalesce(der_summary.planned_capacity_kw, F.lit(0.0)).alias("total_planned_capacity_kw"),
+        
+        # Geometry (WKT LineString or NULL)
+        circuits.geom_wkt,
+        
+        # Map render level (frontend graceful degradation)
+        F.when(
+            circuits.geom_wkt.isNotNull(),
+            F.lit("geometry")  # Has WKT LineString - render precise feeder line
+        ).when(
+            circuits.grid_area_code.isNotNull(),
+            F.lit("district")  # Has grid hierarchy - cluster by district
+        ).otherwise(
+            F.lit("point_fallback")  # No geometry or hierarchy - render as point
+        ).alias("map_render_level"),
+        
+        # Metadata (tooltips)
+        circuits.hca_refresh_date.alias("capacity_as_of_date"),
+        circuits.ingestion_date.alias("data_as_of_date")
+    )
