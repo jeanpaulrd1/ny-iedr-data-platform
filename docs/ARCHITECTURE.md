@@ -391,6 +391,23 @@ WHERE feeder_id = 'utility1_1105354'
 * **Solution**: Use `spark.readStream.option("skipChangeCommits", "true")` for DQ metrics
 * **Result**: Incremental pipeline runs succeed without full refresh
 
+### 8. Geospatial Data Readiness Strategy
+* **Problem**: Utilities provide inconsistent location data — some with grid hierarchies, some with geometry, some with neither
+* **Solution**: Multi-tier graceful degradation
+  * **Tier 1 (Geometry)**: Parse WKT LineString when provided → precise feeder line rendering
+  * **Tier 2 (Grid Hierarchy)**: Parse native_feeder_id (e.g., "36_13_81756") → district-level clustering
+  * **Tier 3 (Point Fallback)**: Use feeder_id as discrete point markers
+* **Implementation**:
+  * Silver: Parse `grid_state_code`, `grid_area_code`, `grid_circuit_id` from native_feeder_id (NULL for unparseable)
+  * Silver: Add `geom_wkt` passthrough column (NULL until utility provides geometry)
+  * Gold: Add `map_render_level` computed field ("geometry"/"district"/"point_fallback")
+  * Gold: Create `feeder_map_layer` table (denormalized, Liquid Clustered on utility_id + grid_area_code)
+* **Result**: 
+  * utility2: 1,909 feeders across 54 districts → district-level map clustering ready NOW
+  * utility1: 269 feeders → point fallback (no grid hierarchy in IDs)
+  * Frontend queries ONE table with zero joins
+  * Geometry upgrade path ready (add WKT column to source, pipeline passthroughs automatically)
+
 ---
 
 ## 📚 References
