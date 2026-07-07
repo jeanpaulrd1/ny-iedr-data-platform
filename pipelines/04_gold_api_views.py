@@ -156,6 +156,8 @@ def feeders_with_capacity():
         ).alias("available_capacity_mw"),
         
         F.col("color_code"),
+        F.col("color_hex"),
+        F.col("color_name"),
         F.col("shape_length"),
         F.col("hca_refresh_date").alias("capacity_as_of_date")
         # SCD2 metadata (__START_AT, __END_AT) intentionally excluded.
@@ -324,7 +326,9 @@ def feeder_map_layer():
         circuits.grid_circuit_id,
         
         # Visual properties
-        circuits.color_code,
+        circuits.color_code,  # Raw utility color code (for reference)
+        circuits.color_hex,   # Standardized hex for map rendering (e.g. #13AFED)
+        circuits.color_name,  # Normalized color name (e.g. SKYBLUE)
         circuits.max_hosting_capacity_mw,
         circuits.min_hosting_capacity_mw,
         
