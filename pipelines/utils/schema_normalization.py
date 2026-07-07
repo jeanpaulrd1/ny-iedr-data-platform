@@ -209,6 +209,10 @@ def map_circuits_to_canonical(df: DataFrame) -> DataFrame:
     - hca_refresh_date (TIMESTAMP, parsed from string)
     - color_code (STRING)
     - shape_length (DOUBLE)
+    - grid_state_code (INTEGER, parsed from native_feeder_id, NULL for utility1)
+    - grid_area_code (INTEGER, parsed from native_feeder_id, NULL for utility1)
+    - grid_circuit_id (STRING, parsed from native_feeder_id, NULL for utility1)
+    - geom_wkt (STRING, WKT geometry when provided by utility, NULL otherwise)
     
     Args:
         df: Union of utility 1 + utility 2 circuits with *_raw columns
@@ -243,6 +247,19 @@ def map_circuits_to_canonical(df: DataFrame) -> DataFrame:
         # Shape length (already aggregated for utility1, native for utility2) - cast to double
         F.col("shape_length_raw").cast("double").alias("shape_length"),
         
+        # Geospatial: Grid hierarchy parsing (for district-level map grouping)
+        # Format: "36_13_81756" → state=36, area=13, circuit=81756
+        # utility1 has no underscores ("1501601") → NULLs (graceful degradation)
+        # utility2 has 3-part format → enables district clustering
+        F.element_at(F.split(F.col("native_feeder_id"), "_"), 1).cast("integer").alias("grid_state_code"),
+        F.element_at(F.split(F.col("native_feeder_id"), "_"), 2).cast("integer").alias("grid_area_code"),
+        F.element_at(F.split(F.col("native_feeder_id"), "_"), 3).alias("grid_circuit_id"),
+        
+        # Geospatial: Geometry passthrough (NULL until utility provides Shape column)
+        # Expected format: WKT LineString or MultiLineString
+        # Map renderer uses this for precise feeder line drawing when available
+        F.lit(None).cast("string").alias("geom_wkt"),
+        
         # Lineage columns
         "ingestion_timestamp",
         "ingestion_date",
@@ -272,6 +289,9 @@ def map_der_to_canonical(df: DataFrame, der_table_type: str) -> DataFrame:
     - der_status ('installed' or 'planned')
     - planned_installation_date (DATE, planned only)
     - interconnection_queue_id (STRING, utility 2 only)
+    - grid_state_code (INTEGER, parsed from interconnection location, NULL for utility1)
+    - grid_area_code (INTEGER, parsed from interconnection location, NULL for utility1)
+    - grid_circuit_id (STRING, parsed from interconnection location, NULL for utility1)
     """
     # Always include planned columns in the select — even for installed DER they will
     # be NULL. This avoids the "column not found" AnalysisException that occurs when
