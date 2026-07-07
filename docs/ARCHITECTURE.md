@@ -54,6 +54,7 @@
 * **All Utilities**: Normalize null sentinels ("NULL", "null", "" → SQL NULL)
 * **All Utilities**: Map inconsistent field names to unified schema (single-pass CASE WHEN)
 * **All Utilities**: Standardize DER technology types to canonical names
+* **All Utilities**: Standardize color codes to unified hex/name format (color_hex, color_name)
 
 **Key Features:**
 * **Full-Refresh**: Tables rebuilt on each pipeline run from current Bronze data
@@ -88,6 +89,8 @@
   - `der_planned_current`: KEY = `(der_id, utility_id)`, SEQUENCE BY `ingestion_date`
   - **Current records identified by `__END_AT IS NULL`** (NOT `__IS_CURRENT` column)
   - Temporal columns: `__START_AT`, `__END_AT` (NULL = current)
+  - **Color tracking**: `color_code`, `color_hex`, `color_name` in `track_history_column_list`
+    (Standardized in Silver, tracked for capacity-color correlation analysis)
 * **API-Optimized Current Views**: No SCD2 columns, simple queries for API
 * **Liquid Clustering** optimized for query patterns:
   - `circuits_current`: `CLUSTER BY [utility_id, feeder_id]`
@@ -146,6 +149,45 @@ UTILITY_REGISTRY = {
     2: UtilityConfig(...)  # Add more utilities here
 }
 ```
+### 3. Color Code Standardization
+**Decision**: Standardize color codes in Silver layer for uniform map rendering
+
+**Problem**: Utilities use different color code formats:
+* **utility1**: Compound format with embedded hex and name (e.g., "0.00 TO 0.29 BROWN-953736")
+* **utility2**: Simple color names only (e.g., "blue", "red", "dark blue")
+
+**Solution**: Silver layer generates standardized columns via `standardize_colors()`:
+* **color_hex**: Standard 6-digit hex code (e.g., #F96A0D, #13AFED)
+* **color_name**: Uppercase canonical name (e.g., ORANGE, SKYBLUE)
+
+**Implementation**:
+```python
+# pipelines/utils/schema_normalization.py
+def map_circuits_to_canonical(df, utility_id):
+    # For utility1: Extract hex from "BROWN-953736" format
+    # For utility2: Map names to standard hex codes
+    df = df.withColumn("color_hex", 
+        when(col("color_code").contains("-"), ...)  # Extract
+        .otherwise(...))  # Map from dict
+    df = df.withColumn("color_name",
+        when(col("color_code").contains("-"), ...)  # Extract
+        .otherwise(upper(col("color_code"))))  # Normalize
+    return df
+```
+
+**Rationale**:
+* **Single source of truth**: Color logic in one place (Silver layer)
+* **Automatic propagation**: All downstream Gold views inherit standardized colors
+* **Maintainability**: Future color mappings only need Silver layer updates
+* **Map rendering ready**: Frontend receives consistent hex codes without per-utility logic
+
+**Result**:
+* Both utilities now use same hex codes (e.g., BROWN → #953736, BLUE → #0070C0)
+* Gold SCD2 tracks color changes over time (color_hex, color_name in track_history_column_list)
+* API views expose standardized colors for map rendering and dashboards
+
+---
+
 ### 3. SCD2 Key Design
 **Multi-tenant safety**: All SCD2 keys include `utility_id`
 * Prevents collisions when different utilities use the same native IDs
@@ -197,7 +239,7 @@ Bronze Layer (Raw, STRING columns, no partitioning/clustering)
          ↓
   [N-Utility Registry → Dynamic Transformations per Utility]
          ↓
-  [Standardization, Segment→Feeder, Unpivot, Quality Checks]
+  [Standardization, Segment→Feeder, Unpivot, Color Standardization, Quality Checks]
          ↓
 Silver Layer (Full-Refresh, Feeder-level, Normalized DER types, no clustering)
          ↓ (skipChangeCommits for streaming reads)
@@ -390,6 +432,23 @@ WHERE feeder_id = 'utility1_1105354'
 * **Problem**: Silver full-refresh creates change commits that downstream streaming reads reject
 * **Solution**: Use `spark.readStream.option("skipChangeCommits", "true")` for DQ metrics
 * **Result**: Incremental pipeline runs succeed without full refresh
+
+### 9. Color Standardization Pattern
+* **Problem**: Utilities use incompatible color formats — utility1 embeds hex in compound strings, utility2 uses plain names
+* **Initial approach**: Attempted to add standardization in Gold API views
+* **Better solution**: Move standardization to Silver layer
+  * **Why Silver**: Single source of truth, automatic propagation to all downstream tables
+  * **Implementation**: `standardize_colors()` in `schema_normalization.py`
+  * **Color extraction**: Parse utility1's "0.00 TO 0.29 BROWN-953736" format with regex
+  * **Color mapping**: Dictionary-based lookup for utility2's simple names (blue → #0070C0)
+  * **Fallback**: Unknown colors → #808080 (gray)
+* **Result**: 
+  * Gold SCD2 tracks color changes (added to track_history_column_list)
+  * API views simply pass through standardized color_hex and color_name
+  * Map rendering works uniformly across all utilities
+  * Future utilities only need to add mappings to Silver layer
+
+---
 
 ### 8. Geospatial Data Readiness Strategy
 * **Problem**: Utilities provide inconsistent location data — some with grid hierarchies, some with geometry, some with neither
