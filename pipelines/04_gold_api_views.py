@@ -357,5 +357,5 @@ def feeder_map_layer():
         
         # Metadata (tooltips)
         circuits.hca_refresh_date.alias("capacity_as_of_date"),
-        circuits.ingestion_date.alias("data_as_of_date")
+        circuits.hca_refresh_date.alias("data_as_of_date")
     )
