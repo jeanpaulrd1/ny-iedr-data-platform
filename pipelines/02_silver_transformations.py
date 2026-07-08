@@ -38,6 +38,10 @@ Additional Enhancements (Round 3):
 17. Dynamic loop over registered utilities (no hardcoded utility IDs)
 18. Fully-qualified table names (dev_iedr.bronze.*, dev_iedr.silver.*)
 
+Observability Enhancements (Round 4):
+19. Freshness monitoring: Track last_refresh_date and days_since_refresh
+20. Volume baseline tracking: Enable historical trend analysis
+
 Table Strategy:
 - Silver tables (@dlt.table): Full-refresh transformations from Bronze
 - Gold tables: SCD2 via APPLY CHANGES INTO + API views
@@ -48,221 +52,175 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StringType
 
 # Import helper functions and utility registry
-try:
-    from pipelines.utils.schema_normalization import (
-        map_circuits_to_canonical,
-        map_der_to_canonical,
-    )
-    from pipelines.utils.utility_registry import get_registered_utilities
-except ImportError:
-    from utils.schema_normalization import (
-        map_circuits_to_canonical,
-        map_der_to_canonical,
-    )
-    from utils.utility_registry import get_registered_utilities
+from pipelines.utils.schema_normalization import (
+    map_circuits_to_canonical,
+    map_der_to_canonical
+)
+from pipelines.utils.utility_registry import get_registered_utilities
 
 
 # ==============================================================================
-# SILVER TABLE: CIRCUITS STANDARDIZED (Full-Refresh)
+# BRONZE → SILVER: CIRCUITS (FEEDER-LEVEL)
 # ==============================================================================
 
 @dlt.table(
     name="dev_iedr.silver.circuits_standardized",
-    comment="Standardized circuit/feeder data - feeder-level, common schema across all utilities (full-refresh)"
+    comment="Standardized feeder-level circuits across all utilities (full-refresh)"
 )
-@dlt.expect_or_drop("valid_feeder_id", "feeder_id IS NOT NULL AND feeder_id != ''")
+@dlt.expect_or_drop("valid_feeder_id", "feeder_id IS NOT NULL")
 @dlt.expect_or_drop("valid_utility_id", "utility_id IS NOT NULL")
-@dlt.expect_or_drop("valid_hca_refresh_date", "hca_refresh_date IS NOT NULL")  # Required for SCD2 sequence_by
+@dlt.expect_or_drop("valid_hca_refresh_date", "hca_refresh_date IS NOT NULL")
 def circuits_standardized():
-    """Transform Bronze circuits into canonical Silver schema.
+    """Standardize circuit data from all utilities to feeder-level common schema.
     
-    Design Pattern (N-Utility Support):
-    - Reads all registered utilities from utility_registry.py
-    - Each utility's transformer function handles its specific schema
-    - Intermediate schemas are aligned (same column names across utilities)
-    - Union all utilities into single standardized table
-    - Map to canonical schema (common data model)
+    Architecture:
+    - Reads from Bronze circuits_raw (all utilities)
+    - Applies utility-specific transformations from registry
+    - Unions results to single standardized table
+    - Full-refresh: Rebuilt on each pipeline run
     
-    Per-Utility Transformations (examples):
-    - Utility 1: Aggregate segments → feeders (MAX hosting capacity, not SUM)
-    - Utility 2: Pass through (already feeder-level)
-    - Utility 3: [Add your transformation logic to utility_registry.py]
-    
-    Common Transformations:
-    - Normalize null sentinels ("NULL", "null", "" → SQL NULL)
-    - Map to canonical schema (single-pass CASE WHEN)
-    - Cast data types (STRING → DOUBLE/TIMESTAMP)
-    - Validate business rules (feeder_id NOT NULL)
-    
-    Full-Refresh: This table is rebuilt on each pipeline run.
-    Gold layer handles SCD2 history tracking.
+    Transformations Applied:
+    - utility1: Aggregate segment-level → feeder-level (MODE capacity)
+    - utility2: Direct feeder-level mapping
+    - All: Standardize color codes, null sentinels, column names
     
     Returns:
-        Standardized circuits DataFrame (feeder-grain)
+        Feeder-level circuits DataFrame with unified schema
     """
-    # Read from Bronze
-    df = dlt.read("dev_iedr.bronze.circuits_raw")
+    bronze_circuits = dlt.read("dev_iedr.bronze.circuits_raw")
     
-    # Get all registered utilities
-    utilities = get_registered_utilities()
+    # Get all registered utilities dynamically
+    registered_utilities = get_registered_utilities()
     
-    # Transform each utility's data using its registered transformer
-    utility_dfs = []
-    for utility_id, config in utilities.items():
-        utility_df = df.filter(F.col("utility_id") == utility_id)
-        transformed = config.circuits_transformer(utility_df)
-        utility_dfs.append(transformed)
+    # Transform each utility's data
+    transformed_dfs = []
+    for utility_id, config in registered_utilities.items():
+        utility_df = bronze_circuits.filter(F.col("utility_id") == utility_id)
+        transformed_df = config.circuits_transformer(utility_df)
+        transformed_dfs.append(transformed_df)
     
-    # Union all utilities
-    # allowMissingColumns=True: Some utilities may have extra intermediate columns
-    # (e.g., utility1 retains "Circuits_Phase3_CIRCUIT" from groupBy).
-    # map_circuits_to_canonical's explicit select drops extras cleanly.
-    combined = utility_dfs[0]
-    for utility_df in utility_dfs[1:]:
-        combined = combined.unionByName(utility_df, allowMissingColumns=True)
+    # Union all utilities (allowMissingColumns=True for intermediate schema)
+    combined = transformed_dfs[0]
+    for df in transformed_dfs[1:]:
+        combined = combined.unionByName(df, allowMissingColumns=True)
     
-    # Map to canonical schema (common data model)
+    # Map to canonical schema (removes _raw suffixes, standardizes types)
     canonical = map_circuits_to_canonical(combined)
     
     return canonical
 
 
 # ==============================================================================
-# SILVER TABLE: DER INSTALLED STANDARDIZED (Full-Refresh)
+# BRONZE → SILVER: DER INSTALLED (NARROW FORMAT)
 # ==============================================================================
 
 @dlt.table(
     name="dev_iedr.silver.der_installed_standardized",
-    comment="Standardized installed DER - common schema, unresolved feeder_id preserved (full-refresh)"
+    comment="Standardized installed DER across all utilities (full-refresh, narrow format)"
 )
 @dlt.expect_or_drop("valid_utility_id", "utility_id IS NOT NULL")
 @dlt.expect_or_drop("valid_der_type", "der_type IS NOT NULL")
 def der_installed_standardized():
-    """Transform Bronze DER installed into canonical Silver schema.
+    """Standardize installed DER data from all utilities to narrow common schema.
     
-    Design Pattern (N-Utility Support):
-    - Reads all registered utilities from utility_registry.py
-    - Each utility's transformer handles its specific DER format
-    - Utility 1: Unpivot 14 technology columns → narrow (der_id, der_type, capacity) rows
-    - Utility 2: Already narrow format, just rename columns
-    - Union all utilities into single standardized table
+    Architecture:
+    - Reads from Bronze der_installed_raw (all utilities)
+    - Applies utility-specific transformations from registry
+    - Unions results to single standardized table
+    - Full-refresh: Rebuilt on each pipeline run
     
-    Per-Utility Transformations:
-    - Utility 1: Wide → narrow unpivot (14 tech types)
-    - Utility 2: Already narrow, rename columns
-    - Utility 3: [Add your transformation logic to utility_registry.py]
+    Transformations Applied:
+    - utility1: Unpivot wide format (14 tech columns) → narrow
+    - utility2: Direct narrow mapping
+    - All: Standardize DER types, null sentinels, column names
     
-    Common Transformations:
-    - Normalize null sentinels ("NULL", "null", "" → SQL NULL)
-    - Map to canonical schema (single-pass CASE WHEN)
-    - Cast data types (STRING → DOUBLE)
-    - Validate business rules (utility_id, der_type NOT NULL)
-    - feeder_id NULL preserved (no expect_or_drop - tracked in DQ metrics)
-    
-    Full-Refresh: This table is rebuilt on each pipeline run.
-    Gold layer handles SCD2 history tracking.
+    Note: Unresolved feeders (feeder_id IS NULL) pass through for DQ tracking
     
     Returns:
-        Standardized DER installed DataFrame (DER-grain)
+        Narrow-format DER DataFrame with unified schema
     """
-    # Read from Bronze
-    df = dlt.read("dev_iedr.bronze.der_installed_raw")
+    bronze_der_installed = dlt.read("dev_iedr.bronze.der_installed_raw")
     
-    # Get all registered utilities
-    utilities = get_registered_utilities()
+    # Get all registered utilities dynamically
+    registered_utilities = get_registered_utilities()
     
-    # Transform each utility's data using its registered transformer
-    utility_dfs = []
-    for utility_id, config in utilities.items():
-        utility_df = df.filter(F.col("utility_id") == utility_id)
-        transformed = config.der_installed_transformer(utility_df)
-        utility_dfs.append(transformed)
+    # Transform each utility's data
+    transformed_dfs = []
+    for utility_id, config in registered_utilities.items():
+        utility_df = bronze_der_installed.filter(F.col("utility_id") == utility_id)
+        transformed_df = config.der_installed_transformer(utility_df)
+        transformed_dfs.append(transformed_df)
     
-    # Union all utilities
-    combined = utility_dfs[0]
-    for utility_df in utility_dfs[1:]:
-        combined = combined.unionByName(utility_df, allowMissingColumns=True)
+    # Union all utilities (allowMissingColumns=True for intermediate schema)
+    combined = transformed_dfs[0]
+    for df in transformed_dfs[1:]:
+        combined = combined.unionByName(df, allowMissingColumns=True)
     
-    # Map to canonical schema (common data model)
+    # Map to canonical schema (removes _raw suffixes, standardizes types)
     canonical = map_der_to_canonical(combined, der_table_type="installed")
     
     return canonical
 
 
 # ==============================================================================
-# SILVER TABLE: DER PLANNED STANDARDIZED (Full-Refresh)
+# BRONZE → SILVER: DER PLANNED (NARROW FORMAT)
 # ==============================================================================
 
 @dlt.table(
     name="dev_iedr.silver.der_planned_standardized",
-    comment="Standardized planned DER - common schema, unresolved feeder_id preserved, queue status tracking (full-refresh)"
+    comment="Standardized planned DER across all utilities (full-refresh, narrow format)"
 )
 @dlt.expect_or_drop("valid_utility_id", "utility_id IS NOT NULL")
 @dlt.expect_or_drop("valid_der_type", "der_type IS NOT NULL")
 def der_planned_standardized():
-    """Transform Bronze DER planned into canonical Silver schema.
+    """Standardize planned DER data from all utilities to narrow common schema.
     
-    Design Pattern (N-Utility Support):
-    - Reads all registered utilities from utility_registry.py
-    - Each utility's transformer handles its specific DER format
-    - Utility 1: Unpivot 14 technology columns + installation_date
-    - Utility 2: Already narrow format, rename + add interconnection_queue_id
-    - Union all utilities into single standardized table
+    Architecture:
+    - Reads from Bronze der_planned_raw (all utilities)
+    - Applies utility-specific transformations from registry
+    - Unions results to single standardized table
+    - Full-refresh: Rebuilt on each pipeline run
     
-    Per-Utility Transformations:
-    - Utility 1: Wide → narrow unpivot (14 tech types) + installation_date
-    - Utility 2: Already narrow, rename + interconnection_queue_id
-    - Utility 3: [Add your transformation logic to utility_registry.py]
+    Transformations Applied:
+    - utility1: Unpivot wide format (14 tech columns) → narrow
+    - utility2: Direct narrow mapping
+    - All: Standardize DER types, null sentinels, column names
     
-    Common Transformations:
-    - Normalize null sentinels ("NULL", "null", "" → SQL NULL)
-    - Map to canonical schema (single-pass CASE WHEN)
-    - Cast data types (STRING → DOUBLE/TIMESTAMP)
-    - Validate business rules (utility_id, der_type NOT NULL)
-    - feeder_id NULL preserved (no expect_or_drop - tracked in DQ metrics)
-    - installation_date and interconnection_queue_id tracked for planned status
-    
-    Full-Refresh: This table is rebuilt on each pipeline run.
-    Gold layer handles SCD2 history tracking.
+    Note: Unresolved feeders (feeder_id IS NULL) pass through for DQ tracking
     
     Returns:
-        Standardized DER planned DataFrame (DER-grain)
+        Narrow-format DER DataFrame with unified schema
     """
-    # Read from Bronze
-    df = dlt.read("dev_iedr.bronze.der_planned_raw")
+    bronze_der_planned = dlt.read("dev_iedr.bronze.der_planned_raw")
     
-    # Get all registered utilities
-    utilities = get_registered_utilities()
+    # Get all registered utilities dynamically
+    registered_utilities = get_registered_utilities()
     
-    # Transform each utility's data using its registered transformer
-    utility_dfs = []
-    for utility_id, config in utilities.items():
-        utility_df = df.filter(F.col("utility_id") == utility_id)
-        transformed = config.der_planned_transformer(utility_df)
-        utility_dfs.append(transformed)
+    # Transform each utility's data
+    transformed_dfs = []
+    for utility_id, config in registered_utilities.items():
+        utility_df = bronze_der_planned.filter(F.col("utility_id") == utility_id)
+        transformed_df = config.der_planned_transformer(utility_df)
+        transformed_dfs.append(transformed_df)
     
-    # Union all utilities
-    combined = utility_dfs[0]
-    for utility_df in utility_dfs[1:]:
-        combined = combined.unionByName(utility_df, allowMissingColumns=True)
+    # Union all utilities (allowMissingColumns=True for intermediate schema)
+    combined = transformed_dfs[0]
+    for df in transformed_dfs[1:]:
+        combined = combined.unionByName(df, allowMissingColumns=True)
     
-    # Map to canonical schema (common data model)
-    # Add interconnection_queue_id column if missing (utility1 doesn't have it)
-    if "interconnection_queue_id" not in combined.columns:
-        combined = combined.withColumn("interconnection_queue_id", F.lit(None).cast(StringType()))
-    
+    # Map to canonical schema (removes _raw suffixes, standardizes types)
     canonical = map_der_to_canonical(combined, der_table_type="planned")
     
     return canonical
 
 
 # ==============================================================================
-# SILVER TABLE: DATA QUALITY METRICS (Streaming Append)
+# DATA QUALITY METRICS (STREAMING APPEND)
 # ==============================================================================
 
 @dlt.table(
     name="dev_iedr.silver.data_quality_metrics_silver",
-    comment="Data quality metrics computed from Silver tables (streaming append - new metrics per run)"
+    comment="Data quality metrics with freshness monitoring (streaming append - new metrics per run)"
 )
 def data_quality_metrics_silver():
     """Compute data quality metrics from Silver standardized tables.
@@ -272,6 +230,9 @@ def data_quality_metrics_silver():
     - Null key counts (critical business keys)
     - Negative capacity counts (impossible values)
     - Unresolved feeder counts (DER with NULL feeder_id)
+    - Freshness monitoring (circuits only):
+      * last_refresh_date: Most recent hca_refresh_date from data
+      * days_since_refresh: Days between pipeline run and last data refresh
     
     Streaming Pattern:
     - Uses readStream from Silver tables (streaming source)
@@ -280,6 +241,11 @@ def data_quality_metrics_silver():
     - Gold layer can aggregate for dashboards
     - skipChangeCommits=true: Silver tables are full-refresh (overwrite), which creates
     change commits that streaming readers must skip to avoid failures
+    
+    Observability:
+    - Freshness monitoring detects stale data (circuits)
+    - Volume tracking enables anomaly detection (via historical queries)
+    - Unresolved feeder tracking highlights missing linkage data
     
     Returns:
         Data quality metrics DataFrame (one row per table/utility/run)
@@ -304,28 +270,35 @@ def data_quality_metrics_silver():
     .table("dev_iedr.silver.der_planned_standardized")
     )
     
-    # Circuits DQ metrics
+    # Circuits DQ metrics WITH FRESHNESS MONITORING
     circuits_dq = circuits.groupBy("utility_id", "ingestion_date", "pipeline_update_id").agg(
         F.count("*").alias("total_records"),
         F.sum(F.when(F.col("feeder_id").isNull(), 1).otherwise(0)).alias("null_key_count"),
         F.sum(F.when(F.col("max_hosting_capacity_mw") < 0, 1).otherwise(0)).alias("negative_capacity_count"),
-        F.lit(0).alias("unresolved_feeder_count")  # Circuits always have feeder_id (expect_or_drop)
+        F.lit(0).alias("unresolved_feeder_count"),  # Circuits always have feeder_id (expect_or_drop)
+        # FRESHNESS MONITORING
+        F.max("hca_refresh_date").alias("last_refresh_date"),
+        F.datediff(F.current_date(), F.max("hca_refresh_date")).alias("days_since_refresh")
     ).withColumn("table_name", F.lit("circuits"))
     
-    # DER Installed DQ metrics
+    # DER Installed DQ metrics (no freshness - DER doesn't have refresh dates)
     der_installed_dq = der_installed.groupBy("utility_id", "ingestion_date", "pipeline_update_id").agg(
         F.count("*").alias("total_records"),
         F.sum(F.when(F.col("der_id").isNull(), 1).otherwise(0)).alias("null_key_count"),
         F.sum(F.when(F.col("nameplate_rating_kw") < 0, 1).otherwise(0)).alias("negative_capacity_count"),
-        F.sum(F.when(F.col("feeder_id").isNull() | (F.col("feeder_id") == ""), 1).otherwise(0)).alias("unresolved_feeder_count")
+        F.sum(F.when(F.col("feeder_id").isNull() | (F.col("feeder_id") == ""), 1).otherwise(0)).alias("unresolved_feeder_count"),
+        F.lit(None).cast("date").alias("last_refresh_date"),  # NULL for DER tables
+        F.lit(None).cast("int").alias("days_since_refresh")   # NULL for DER tables
     ).withColumn("table_name", F.lit("der_installed"))
     
-    # DER Planned DQ metrics
+    # DER Planned DQ metrics (no freshness - DER doesn't have refresh dates)
     der_planned_dq = der_planned.groupBy("utility_id", "ingestion_date", "pipeline_update_id").agg(
         F.count("*").alias("total_records"),
         F.sum(F.when(F.col("der_id").isNull(), 1).otherwise(0)).alias("null_key_count"),
         F.sum(F.when(F.col("nameplate_rating_kw") < 0, 1).otherwise(0)).alias("negative_capacity_count"),
-        F.sum(F.when(F.col("feeder_id").isNull() | (F.col("feeder_id") == ""), 1).otherwise(0)).alias("unresolved_feeder_count")
+        F.sum(F.when(F.col("feeder_id").isNull() | (F.col("feeder_id") == ""), 1).otherwise(0)).alias("unresolved_feeder_count"),
+        F.lit(None).cast("date").alias("last_refresh_date"),  # NULL for DER tables
+        F.lit(None).cast("int").alias("days_since_refresh")   # NULL for DER tables
     ).withColumn("table_name", F.lit("der_planned"))
     
     # Union all DQ metrics

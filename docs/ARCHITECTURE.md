@@ -33,6 +33,9 @@
     - utility1: 64,539 records (pure artifacts cleared)
     - utility2: 1,909 records (shape_length extracted, artifacts cleared)
 * File tracking with `file_signature` and `pipeline_update_id` for idempotency
+  - **file_signature**: MD5 hash of (file_path + file_size + modification_timestamp)
+  - Purpose: Prevent duplicate ingestion of same file across pipeline runs
+  - Computed in Bronze layer, stored in `file_tracking` table for idempotency checks
 * Change data feed enabled for downstream CDC processing
 
 **Data Volumes (as of 2026-07-05):**
@@ -51,6 +54,7 @@
   - Register new utilities via `UTILITY_REGISTRY` dict without changing pipeline code
   - `get_registered_utilities()` returns all active utilities dynamically
   - **To onboard utility3**: Write 3 transformer functions, add to registry, done
+  - **Each transformer function** uses single-pass CASE WHEN logic to map utility-specific fields to canonical schema
 * **Dynamic Processing**: Silver pipeline loops over registered utilities automatically
   - No hardcoded utility IDs in pipeline code
   - Scalable to N utilities without architectural changes
@@ -59,14 +63,20 @@
 * `dev_iedr.silver.circuits_standardized` - Feeder-level circuits (full-refresh snapshots)
 * `dev_iedr.silver.der_installed_standardized` - Normalized DER installations (full-refresh)
 * `dev_iedr.silver.der_planned_standardized` - Normalized DER planning queue (full-refresh)
-* `dev_iedr.silver.data_quality_metrics_silver` - Data quality metrics from transformations
+* `dev_iedr.silver.data_quality_metrics_silver` - Data quality metrics with freshness monitoring
+  - **Metrics tracked**: Record counts, null keys, negative capacities, unresolved feeders
+  - **Freshness monitoring** (circuits only): `last_refresh_date`, `days_since_refresh`
+  - **Streaming pattern**: Appends new metrics on each run (skipChangeCommits for full-refresh sources)
+  - **Volume baseline**: Enables historical trend analysis and anomaly detection
 
 **Transformations:**
 * **Utility 1**: Aggregate segment-level → feeder-level circuits (MODE capacity, not SUM)
 * **Utility 1**: Unpivot wide DER format (14 one-hot tech columns) → narrow (der_id, der_type, capacity)
 * **Utility 1**: Add `interconnection_queue_id` column (as NULL) to align with utility2 schema
 * **All Utilities**: Normalize null sentinels ("NULL", "null", "" → SQL NULL)
-* **All Utilities**: Map inconsistent field names to unified schema (single-pass CASE WHEN)
+* **All Utilities**: Map inconsistent field names to unified schema via two-step transformation:
+  1. **Transformer functions** return intermediate schema with `_raw` suffixes
+  2. **Canonical mapping layer** (`map_circuits_to_canonical`, `map_der_to_canonical`) produces final schema
 * **All Utilities**: Standardize DER technology types to canonical names
 * **All Utilities**: Standardize color codes to unified hex/name format (color_hex, color_name)
 
@@ -77,7 +87,14 @@
 * Data quality expectations enforced (`@dlt.expect_or_drop` on circuits, DER unresolved feeders pass through)
 * Unresolved DER (feeder_id IS NULL) preserved for data_quality_metrics tracking
 * **Composite DER Keys**: `der_id` includes technology type (e.g., `utility1_proj1_SolarPV`) for hybrid projects
-* **Schema Alignment**: Strict union without `allowMissingColumns` to catch schema drift early
+* **Two-layer transformation**: Intermediate → Canonical mapping preserves separation of concerns
+  - Transformers focus on utility-specific extraction logic
+  - Canonical mappers handle common type casting, date parsing, color standardization
+  - `allowMissingColumns=True` during union (intermediate schemas may vary)
+* **Code simplification (2026-07-08)**: Reduced silver transformations from ~450 to ~306 lines
+  - Removed verbose docstrings (moved details to ARCHITECTURE.md)
+  - Simplified import patterns (removed try/except fallbacks)
+  - Cleaner function signatures and variable names
 
 **Data Quality Issues Tracked:**
 * **DER Installed**: 8 unresolved feeders (utility1), 202 unresolved feeders (utility2)
@@ -246,7 +263,21 @@ UTILITY_REGISTRY = {
     2: UtilityConfig(...)  # Add more utilities here
 }
 ```
-### 3. Color Code Standardization
+
+**How Transformations Work:**
+Each transformer function in the registry contains single-pass CASE WHEN logic to map utility-specific column names to the canonical schema:
+```python
+def transform_utility1_circuits(df):
+    return df.select(
+        F.col("NYHCPV_csv_NFEEDER").alias("native_feeder_id"),
+        F.when(F.col("NYHCPV_csv_FMAXHC").isNotNull(), 
+               F.col("NYHCPV_csv_FMAXHC"))
+         .otherwise(F.col("feeder_max_hc")).alias("max_hosting_capacity_mw"),
+        # ... more CASE WHEN mappings
+    )
+```
+
+### 4. Color Code Standardization
 **Decision**: Standardize color codes in Silver layer for uniform map rendering
 
 **Problem**: Utilities use different color code formats:
@@ -285,7 +316,7 @@ def map_circuits_to_canonical(df, utility_id):
 
 ---
 
-### 3. SCD2 Key Design
+### 5. SCD2 Key Design
 **Multi-tenant safety**: All SCD2 keys include `utility_id`
 * Prevents collisions when different utilities use the same native IDs
 * Example: `utility1_1000` vs `utility2_1000` are distinct DER projects
@@ -296,26 +327,29 @@ def map_circuits_to_canonical(df, utility_id):
 * `utility_id` prefix in `feeder_id`/`der_id` provides uniqueness
 * SCD2 tracking requires utility_id in KEYS to prevent state corruption
 
-### 4. Lineage & Run Tracking
+### 6. Lineage & Run Tracking
 Every table includes:
 * `pipeline_update_id` - **Primary run identifier** (format: `run_YYYYMMDD_HHmmss_<hash>`)
 * `ingestion_timestamp` - Record-level timestamp
 * `ingestion_date` - Date column for time-based filtering
 * `source_file` - Source file path (Bronze only)
 * `file_signature` - File-level deduplication (Bronze only)
+  - MD5 hash of (file_path + file_size + modification_timestamp)
+  - Prevents duplicate ingestion of same file across pipeline runs
+  - Stored in `file_tracking` table for idempotency audit trail
 
 **Why `pipeline_update_id`?**
 * Available via `spark.conf.get("pipelines.update_id")`
 * Links records → runs → DLT event logs → source files
 * Enables lineage, debugging, rollback, and idempotency
 
-### 5. Schema Evolution Strategy
+### 7. Schema Evolution Strategy
 * **Bronze**: All STRING columns, preserve raw source fidelity
 * Auto Loader schema inference with evolution enabled (`addNewColumns` mode)
 * **Silver**: Mapping layer handles heterogeneous schemas across utilities
 * **Strict schema alignment**: `unionByName(allowMissingColumns=False)` catches drift
 
-### 6. Heterogeneous Source Handling
+### 8. Heterogeneous Source Handling
 **Utility 1** (Wide, Segment-Level):
 * Circuits: Segment rows → aggregated to feeder (MODE capacity, not SUM)
 * DER: Wide format (14 one-hot tech columns: SolarPV, Wind, etc.) → unpivoted to narrow
@@ -362,12 +396,13 @@ ORDER BY available_capacity_mw DESC;
 ```
 **Optimization**: `CLUSTER BY [utility_id, feeder_id]`
 
-### Query 2: Get all DER for a specific feeder
+### Query 2: Get DER summary for a specific feeder (aggregated counts)
 ```sql
 SELECT * FROM gold.feeder_der_summary
 WHERE feeder_id = 'utility1_1105354';
 ```
 **Optimization**: `CLUSTER BY [feeder_id, utility_id]`
+**Use Case**: Initial map view showing DER counts per feeder
 
 ### Query 3: Temporal query - capacity history
 ```sql
@@ -386,6 +421,82 @@ FROM gold.circuits_current
 WHERE feeder_id = 'utility1_1105354'
   AND __START_AT <= '2024-01-15'
   AND (__END_AT > '2024-01-15' OR __END_AT IS NULL);
+```
+
+### Query 5: Get individual installed DER records for map click-through
+```sql
+SELECT 
+  der_id,
+  der_type,
+  nameplate_capacity_kw,
+  in_service_date,
+  feeder_id,
+  utility_id
+FROM gold.der_installed_current
+WHERE feeder_id = 'utility1_1105354'
+  AND __END_AT IS NULL  -- Current records only
+ORDER BY nameplate_capacity_kw DESC;
+```
+**Optimization**: `CLUSTER BY [utility_id, feeder_id]`
+**Use Case**: User clicks feeder on map → Show table of all installed DER on that feeder
+
+### Query 6: Get individual planned DER records for map click-through
+```sql
+SELECT 
+  der_id,
+  der_type,
+  nameplate_capacity_kw,
+  estimated_in_service_date,
+  interconnection_queue_id,
+  feeder_id,
+  utility_id
+FROM gold.der_planned_current
+WHERE feeder_id = 'utility1_1105354'
+  AND __END_AT IS NULL  -- Current records only
+ORDER BY estimated_in_service_date ASC;
+```
+**Optimization**: `CLUSTER BY [utility_id, feeder_id]`
+**Use Case**: User clicks feeder on map → Show table of all planned DER projects on that feeder
+
+---
+
+## 🗺️ Map Application Architecture
+
+The IEDR application renders an interactive map with the following data flow:
+
+### Initial Map Load
+1. **Query**: `SELECT * FROM gold.feeders_with_capacity WHERE available_capacity_mw > 0`
+   - Returns all feeders with DER capacity data
+   - Includes `color_hex` for feeder rendering
+   - Shows aggregate DER counts via JOIN to `feeder_der_summary`
+
+### User Clicks Feeder Icon
+2. **Query 5** (Installed DER): Retrieve all installed DER records for clicked feeder
+3. **Query 6** (Planned DER): Retrieve all planned DER projects for clicked feeder
+4. **Display**: Two tables showing individual DER details
+
+### Data Quality Indicators
+The application highlights missing/incomplete data:
+* **Last refresh date**: `hca_refresh_date` from `circuits_current`
+* **Missing feeders**: Unresolved DER (feeder_id IS NULL) from `data_quality_metrics_silver`
+* **Volume statistics**: Record counts from `file_tracking` table
+* **Quality characteristics**: DQ metrics (null keys, negative capacities, unresolved counts)
+
+**Implementation Pattern:**
+```sql
+-- Dashboard query for data quality summary
+SELECT 
+  utility_id,
+  dataset_type,
+  total_records,
+  null_key_count,
+  unresolved_feeder_count,
+  negative_capacity_count,
+  pipeline_update_id,
+  ingestion_date
+FROM gold.data_quality_metrics_silver
+WHERE ingestion_date = (SELECT MAX(ingestion_date) FROM gold.data_quality_metrics_silver)
+ORDER BY utility_id, dataset_type;
 ```
 
 ---
@@ -409,12 +520,6 @@ WHERE feeder_id = 'utility1_1105354'
   - Clear structural artifacts (`_c0`, `_file_path`)
   - Track with `_index_col_dropped` flag
 * **Data ingested**: 66,448 circuit records (100% pass expectations), 72,346 DER records
-* Upload CSVs to landing zone (`/Volumes/dev_iedr/bronze/landing/{utility_id}/`)
-* Develop `helpers.py` (lineage utilities)
-* Build DLT pipeline `01_bronze_ingestion.py`:
-  - `circuits_raw`, `der_installed_raw`, `der_planned_raw`, `file_tracking`
-  - All with lineage columns (no partitioning/clustering)
-* **Data ingested**: 66,448 circuit records, 72,346 DER records
 
 ### Phase 3: Silver Layer ✅ COMPLETE
 * Develop `schema_normalization.py` (utility-specific transformations)
@@ -438,14 +543,31 @@ WHERE feeder_id = 'utility1_1105354'
 * Track data quality metrics (unresolved feeders, null keys)
 * **SCD2 multi-tenant keys**: Include `utility_id` in all composite keys
 
-### Phase 5: Testing & Production (IN PROGRESS)
-* ✅ End-to-end pipeline validation
+### Phase 5: Observability & Monitoring ✅ COMPLETE (2026-07-08)
+* **Freshness Monitoring**: Added `last_refresh_date` and `days_since_refresh` to DQ metrics
+  - Circuits: 1,362-1,376 days since last refresh (stale data detected)
+  - DER tables: NULL (no refresh dates in source data)
+* **Volume Baseline Tracking**: Created SQL query for anomaly detection (`docs/volume_baseline_tracking.sql`)
+  - 30-day rolling average and standard deviation
+  - ±2σ threshold for ANOMALY_LOW/ANOMALY_HIGH flags
+* **Job Alert Setup**: Documentation for email, Slack, and PagerDuty alerts (`docs/JOB_ALERT_SETUP.md`)
+* **Data Quality Thresholds**: Defined alert criteria for null keys, stale data, volume anomalies
+* **Testing**: Full pipeline validation with observability enhancements
+  - Run 1 (full refresh): 2m 47s
+  - Run 2 (incremental): 1m 13s (56% faster)
+  - All 17 tables across 4 layers validated
+
+### Phase 6: Testing & Production (IN PROGRESS)
+* ✅ End-to-end pipeline validation (2 successful runs)
 * ✅ Data quality validation (DQ metrics table operational)
 * ✅ N-utility registry pattern implemented and tested
-* 🔲 Integration tests for full Bronze → Gold pipeline
+* ✅ Observability enhancements (freshness, volume, alerts) validated
+* ✅ Code refactoring and simplification (silver layer -144 lines)
+* ✅ Import and schema mapping bugs fixed during testing
 * 🔲 Deploy to `prod_iedr`
-* 🔲 Schedule pipelines
+* 🔲 Schedule pipelines (daily/weekly cadence)
 * 🔲 Set up monitoring dashboards
+* 🔲 Production smoke tests
 
 ---
 
@@ -472,20 +594,89 @@ WHERE feeder_id = 'utility1_1105354'
 * **Gold**: Completeness metrics tracked in `data_quality_metrics_silver` table
   - Total records, null key counts, unresolved feeder counts, negative capacity counts
 
-**Current DQ Metrics (2026-07-05 run):**
+**Current DQ Metrics (2026-07-08 run):**
 * Circuits: 0 null keys, 0 negative capacities, 0 unresolved feeders
+  - **Freshness**: utility1 (1,362 days old), utility2 (1,376 days old) - both STALE
+  - Total feeders: 2,178 (269 utility1 + 1,909 utility2)
 * DER Installed: 0 null keys, 210 unresolved feeders (8 utility1, 202 utility2)
+  - Total assets: 39,657 (14,120 utility1 + 25,537 utility2)
 * DER Planned: 0 null keys, 919 unresolved feeders (345 utility1, 574 utility2)
+  - Total projects: 32,689 (1,733 utility1 + 30,956 utility2)
 
 ---
 
 ## 🔍 Monitoring & Observability
 
-* **DLT Event Logs**: Track pipeline runs, errors, data quality metrics
-* **Data Quality Dashboard**: Query `dev_iedr.gold.data_quality_metrics_silver` for trends
+### Real-Time Monitoring
+* **DLT Event Logs**: Track pipeline runs, errors, execution duration
 * **Pipeline Update ID**: Trace every record to originating run
 * **File Tracking**: Idempotency and deduplication audit trail (`file_tracking` table)
 * **SCD2 History**: Temporal queries via `__START_AT` and `__END_AT`
+
+### Data Quality Tracking
+* **DQ Metrics Table**: `dev_iedr.silver.data_quality_metrics_silver`
+  - Total record counts per utility/dataset
+  - Null key counts (critical business keys)
+  - Negative capacity counts (data validation)
+  - Unresolved feeder counts (missing linkage data)
+  - **NEW: Freshness monitoring** (circuits only)
+    - `last_refresh_date`: Most recent `hca_refresh_date` from utility data
+    - `days_since_refresh`: Days between pipeline run and last data refresh
+    - Alerts trigger when > 30 days (warning) or > 45 days (critical)
+
+### Volume Anomaly Detection
+* **Baseline Tracking**: 30-day rolling average and standard deviation
+* **Anomaly Detection**: ±2 standard deviations (95% confidence interval)
+* **Status Flags**:
+  - `ANOMALY_LOW`: Record count significantly below baseline (potential data loss)
+  - `ANOMALY_HIGH`: Record count significantly above baseline (duplication/drift)
+  - `NORMAL`: Within expected range
+  - `INSUFFICIENT_BASELINE`: < 3 runs (baseline not yet established)
+* **Query**: `/docs/volume_baseline_tracking.sql`
+
+### Alert Configuration
+* **Pipeline Failures**: Email alerts on job failure
+* **DQ Threshold Violations**: SQL alerts for null keys, stale data, high unresolved counts
+* **Volume Anomalies**: SQL alerts for record count deviations
+* **Setup Guide**: `/docs/JOB_ALERT_SETUP.md`
+
+### Alert Priority Matrix
+
+| Condition | Severity | Channel | Action |
+|-----------|----------|---------|--------|
+| Pipeline failure | 🔴 Critical | Email + Slack | Immediate investigation |
+| null_key_count > 0 | 🔴 Critical | Email + Slack | Fix referential integrity |
+| days_since_refresh > 45 | 🔴 Critical | Email | Contact utility data team |
+| Volume ANOMALY_LOW | 🟠 High | Slack | Investigate data loss |
+| Volume ANOMALY_HIGH | 🟡 Medium | Slack | Check for duplicates |
+| unresolved_feeder_count > 1000 | 🟡 Medium | Email | Review utility data quality |
+
+### Observability Tools
+
+1. **Freshness Monitoring Query:**
+```sql
+SELECT utility_id, table_name, last_refresh_date, days_since_refresh,
+  CASE 
+    WHEN days_since_refresh > 45 THEN '🔴 STALE'
+    WHEN days_since_refresh > 30 THEN '⚠️  AGING'
+    ELSE '✅ FRESH'
+  END as freshness_status
+FROM dev_iedr.silver.data_quality_metrics_silver
+WHERE table_name = 'circuits'
+  AND ingestion_date = CURRENT_DATE;
+```
+
+2. **Volume Anomaly Query:** See `/docs/volume_baseline_tracking.sql`
+
+3. **Historical Trend Analysis:**
+```sql
+SELECT ingestion_date, utility_id, table_name, total_records,
+  LAG(total_records) OVER (PARTITION BY utility_id, table_name ORDER BY ingestion_date) as prev_records,
+  total_records - LAG(total_records) OVER (PARTITION BY utility_id, table_name ORDER BY ingestion_date) as day_over_day_change
+FROM dev_iedr.silver.data_quality_metrics_silver
+WHERE ingestion_date >= CURRENT_DATE - 7
+ORDER BY utility_id, table_name, ingestion_date DESC;
+```
 
 ---
 
@@ -499,6 +690,7 @@ WHERE feeder_id = 'utility1_1105354'
 * **Version Control**: Git (GitHub repository: `ny-iedr-data-platform`)
 * **Testing**: pytest + PySpark (unit tests for transformations)
 * **Pipeline Mode**: Triggered (not continuous)
+* **Monitoring**: Databricks SQL Alerts, DLT Event Logs, custom DQ metrics
 
 ---
 
@@ -539,7 +731,7 @@ WHERE feeder_id = 'utility1_1105354'
 * **Solution**: Use `spark.readStream.option("skipChangeCommits", "true")` for DQ metrics
 * **Result**: Incremental pipeline runs succeed without full refresh
 
-### 9. Color Standardization Pattern
+### 8. Color Standardization Pattern
 * **Problem**: Utilities use incompatible color formats — utility1 embeds hex in compound strings, utility2 uses plain names
 * **Initial approach**: Attempted to add standardization in Gold API views
 * **Better solution**: Move standardization to Silver layer
@@ -556,7 +748,7 @@ WHERE feeder_id = 'utility1_1105354'
 
 ---
 
-### 8. Geospatial Data Readiness Strategy
+### 9. Geospatial Data Readiness Strategy
 * **Problem**: Utilities provide inconsistent location data — some with grid hierarchies, some with geometry, some with neither
 * **Solution**: Multi-tier graceful degradation
   * **Tier 1 (Geometry)**: Parse WKT LineString when provided → precise feeder line rendering
@@ -599,6 +791,50 @@ WHERE feeder_id = 'utility1_1105354'
   * Better representation of true feeder capacity than MAX approach
   * No performance impact (MODE is native PySpark function)
   * Tested and validated: All 291 feeders processed correctly
+
+---
+
+### 11. Observability First Approach
+* **Problem**: Initial implementation focused on data flow without proactive monitoring
+* **Initial state**: Basic DQ metrics (null counts, record totals) but no freshness or volume tracking
+* **Solution**: Add layered observability enhancements
+  * **Freshness Monitoring**: Track `days_since_refresh` to detect stale utility data
+  * **Volume Baseline**: Compare current run against 30-day rolling average (±2σ threshold)
+  * **Alert Matrix**: Tiered severity levels (Critical → High → Medium) with clear action items
+* **Implementation**:
+  * Silver DQ metrics table enhanced with freshness columns (circuits only)
+  * SQL query for volume anomaly detection (`volume_baseline_tracking.sql`)
+  * Alert setup documentation with Slack/email/PagerDuty patterns
+* **Result**:
+  * Proactive detection of data issues before they impact downstream users
+  * Baseline tracking catches both data loss (ANOMALY_LOW) and duplication (ANOMALY_HIGH)
+  * Freshness monitoring flags when utility data exceeds 30-day refresh window
+  * Clear escalation path: Email → Slack → PagerDuty based on severity
+
+---
+
+
+### 12. Refactoring with Two-Layer Schema Transformation
+* **Problem**: Initial code review suggested eliminating the intermediate mapping layer to reduce complexity
+* **Attempted refactoring (2026-07-08)**: Removed canonical mapping functions, expecting transformers to return final schemas
+* **Reality**: Transformers were still returning intermediate schemas with `_raw` suffixes
+* **Failure mode**: Pipeline failed with column resolution errors
+  * `Cannot resolve column name "Circuits_Phase3_CIRCUIT"` (intermediate column leaked through)
+  * `cannot import name 'map_der_installed_to_canonical'` (broken imports)
+  * Wrong function calls (`map_circuits_to_canonical()` on DER data)
+* **Solution**: Restored the two-layer transformation pattern with clarified responsibilities
+  1. **Transformer functions** (`utility_registry.py`): Extract and normalize utility-specific data → intermediate schema
+  2. **Canonical mappers** (`schema_normalization.py`): Type casting, date parsing, color standardization → final schema
+* **Why the pattern works**:
+  * **Separation of concerns**: Utility logic vs. common transformations
+  * **Schema flexibility**: `allowMissingColumns=True` for intermediate unions (utilities may vary)
+  * **Reusability**: Common transformations (colors, dates, nulls) applied once for all utilities
+  * **Testability**: Each layer can be unit tested independently
+* **Refactoring outcome**: Simplified code structure (-144 lines) while preserving separation of concerns
+  * Removed verbose docstrings (details moved to ARCHITECTURE.md)
+  * Cleaned up imports (removed try/except fallbacks)
+  * Kept functional architecture intact
+* **Lesson**: Code simplification ≠ architectural simplification. The two-layer pattern adds ~30 lines vs. direct mapping but provides critical maintainability benefits for N-utility scaling.
 
 ---
 
