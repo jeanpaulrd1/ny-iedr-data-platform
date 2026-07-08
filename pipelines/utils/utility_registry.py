@@ -49,6 +49,28 @@ class UtilityConfig(NamedTuple):
 # UTILITY 1 TRANSFORMERS
 # ==============================================================================
 
+
+
+def drop_bronze_tracking_columns(df: DataFrame) -> DataFrame:
+    """Drop internal Bronze tracking columns before Silver transformation.
+    
+    These columns are for Bronze layer operational tracking only and should
+    not flow downstream to Silver/Gold layers.
+    
+    Args:
+        df: DataFrame from Bronze layer
+        
+    Returns:
+        DataFrame with tracking columns removed
+    """
+    tracking_cols = ["_index_col_dropped", "_rescued_data"]
+    cols_to_drop = [c for c in tracking_cols if c in df.columns]
+    
+    if cols_to_drop:
+        return df.drop(*cols_to_drop)
+    return df
+
+
 def transform_utility1_circuits(df: DataFrame) -> DataFrame:
     """Transform utility1 segment-level circuits to feeder-level intermediate schema.
     
@@ -69,6 +91,9 @@ def transform_utility1_circuits(df: DataFrame) -> DataFrame:
     # Normalize null sentinels
     string_cols = [col for col, dtype in df.dtypes if dtype == "string"]
     df = normalize_null_sentinels(df, string_cols)
+    
+    # Drop Bronze tracking columns
+    df = drop_bronze_tracking_columns(df)
     
     # Aggregate segments to feeder level
     return aggregate_utility1_segments(df)
@@ -94,6 +119,9 @@ def transform_utility1_der_installed(df: DataFrame) -> DataFrame:
     string_cols = [col for col, dtype in df.dtypes if dtype == "string"]
     df = normalize_null_sentinels(df, string_cols)
     
+    # Drop Bronze tracking columns
+    df = drop_bronze_tracking_columns(df)
+    
     # Unpivot 14 technology columns (already includes feeder_id with utility prefix)
     unpivoted = unpivot_utility1_der(df, include_installation_date=False)
     
@@ -116,6 +144,9 @@ def transform_utility1_der_planned(df: DataFrame) -> DataFrame:
     """
     string_cols = [col for col, dtype in df.dtypes if dtype == "string"]
     df = normalize_null_sentinels(df, string_cols)
+    
+    # Drop Bronze tracking columns
+    df = drop_bronze_tracking_columns(df)
     
     # Unpivot 14 technology columns (include installation_date for planned)
     # Already includes feeder_id with utility prefix
@@ -143,6 +174,9 @@ def transform_utility2_circuits(df: DataFrame) -> DataFrame:
     """
     string_cols = [col for col, dtype in df.dtypes if dtype == "string"]
     df = normalize_null_sentinels(df, string_cols)
+    
+    # Drop Bronze tracking columns
+    df = drop_bronze_tracking_columns(df)
     
     return df.select(
         F.col("utility_id"),
@@ -178,6 +212,9 @@ def transform_utility2_der_installed(df: DataFrame) -> DataFrame:
     string_cols = [col for col, dtype in df.dtypes if dtype == "string"]
     df = normalize_null_sentinels(df, string_cols)
     
+    # Drop Bronze tracking columns
+    df = drop_bronze_tracking_columns(df)
+    
     return df.select(
         F.col("utility_id"),
         F.col("DER_ID").alias("der_id"),
@@ -207,6 +244,9 @@ def transform_utility2_der_planned(df: DataFrame) -> DataFrame:
     """
     string_cols = [col for col, dtype in df.dtypes if dtype == "string"]
     df = normalize_null_sentinels(df, string_cols)
+    
+    # Drop Bronze tracking columns
+    df = drop_bronze_tracking_columns(df)
     
     return df.select(
         F.col("utility_id"),

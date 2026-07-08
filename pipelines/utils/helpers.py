@@ -178,3 +178,189 @@ def strip_utf8_bom(df: DataFrame) -> DataFrame:
             df = df.withColumnRenamed(old_name, new_name)
     
     return df
+
+def clear_index_artifact_from_rescued_data(df: DataFrame) -> DataFrame:
+    """Clear _rescued_data if it contains ONLY structural artifacts, with case-variant column extraction.
+    
+    TWO-STEP APPROACH:
+    
+    STEP 1: Extract Business Columns with Case Variations
+    Some utilities export the same business column with different casing 
+    (e.g., utility1: 'Shape_Length', utility2: 'shape_length'). Auto Loader's 
+    case-sensitive schema matching sends the lowercase variant to _rescued_data.
+    
+    This step extracts known case-variant columns from _rescued_data and populates
+    the canonical (target) column, then removes them from _rescued_data.
+    
+    STEP 2: Clear Pure Artifacts
+    After extraction, if _rescued_data contains ONLY known artifacts 
+    (_c0, _file_path), clear it to NULL. This prevents false positive alerts
+    on structural artifacts while preserving real schema drift.
+    
+    Known artifacts (cleared in Step 2):
+    - _c0: Index column from empty-named first column (numeric sequential values)
+    - _file_path: Duplicate file path metadata (already in source_file column)
+    
+    Known case variants (extracted in Step 1):
+    - shape_length (lowercase) → Shape_Length (Title Case)
+    
+    Pattern examples:
+    
+    Before: {"shape_length":"1.27","_file_path":"..."}
+    Step 1: Extract shape_length → Shape_Length column, _rescued_data = {"_file_path":"..."}
+    Step 2: Only _file_path remains (pure artifact) → _rescued_data = NULL
+    
+    Before: {"_c0":"123","_file_path":"..."}
+    Step 1: No business columns to extract, _rescued_data unchanged
+    Step 2: Only artifacts present → _rescued_data = NULL
+    
+    Before: {"new_column":"value","_file_path":"..."}
+    Step 1: new_column is not a known variant, _rescued_data unchanged
+    Step 2: Has unknown business column → _rescued_data preserved (real drift)
+    
+    Args:
+        df: DataFrame with _rescued_data column
+        
+    Returns:
+        DataFrame with:
+        - Case-variant columns extracted and populated in target columns
+        - _rescued_data cleared if only artifacts remain
+        - _index_col_dropped flag for tracking
+        
+    Example:
+        >>> # utility2: lowercase shape_length
+        >>> # Before: Shape_Length=NULL, _rescued_data='{"shape_length":"1.27","_file_path":"..."}'
+        >>> df = clear_index_artifact_from_rescued_data(df)
+        >>> # After: Shape_Length="1.27", _rescued_data=NULL
+    """
+    # Check if _rescued_data column exists
+    if "_rescued_data" not in df.columns:
+        return df.withColumn("_index_col_dropped", F.lit(False))
+    
+    # =========================================================================
+    # STEP 1: Extract Business Columns with Case Variations
+    # =========================================================================
+    
+    # Define case-variant mappings: (rescued_key, target_column)
+    # Add more mappings here as new case variations are discovered
+    case_variant_mappings = [
+        ("shape_length", "Shape_Length"),  # utility2 lowercase → utility1 Title Case
+    ]
+    
+    # Extract each known case variant from _rescued_data
+    for rescued_key, target_column in case_variant_mappings:
+        # Check if target column exists in schema
+        if target_column not in df.columns:
+            continue
+        
+        # Extract value from _rescued_data JSON using get_json_object
+        # Example: get_json_object('{"shape_length":"1.27"}', '$.shape_length') = "1.27"
+        extracted_value = F.get_json_object(F.col("_rescued_data"), f"$.{rescued_key}")
+        
+        # Populate target column if it's NULL and extracted_value exists
+        # This handles: utility1 has Shape_Length populated, utility2 has it in _rescued_data
+        df = df.withColumn(
+            target_column,
+            F.coalesce(F.col(target_column), extracted_value)
+        )
+        
+        # Remove the extracted key from _rescued_data JSON
+        # Strategy: Parse JSON, check if key exists, rebuild without it
+        # Use regexp_replace to remove the key-value pair from JSON
+        # Pattern: Remove '"key":"value",' or ',"key":"value"' or '"key":"value"'
+        
+        # Build regex patterns to match the key in different positions
+        # Pattern 1: "key":"value", (key at start or middle, has comma after)
+        pattern1 = F.concat(F.lit('"'), F.lit(rescued_key), F.lit(r'":"[^"]*",'))
+        # Pattern 2: ,"key":"value" (key at end or middle, has comma before)
+        pattern2 = F.concat(F.lit(r',"'), F.lit(rescued_key), F.lit(r'":"[^"]*"'))
+        # Pattern 3: "key":"value" (only key in object)
+        pattern3 = F.concat(F.lit('"'), F.lit(rescued_key), F.lit(r'":"[^"]*"'))
+        
+        # Apply replacements in sequence
+        df = df.withColumn(
+            "_rescued_data",
+            F.when(
+                F.col("_rescued_data").contains(f'"{rescued_key}"'),
+                # Try pattern 1 first (key with trailing comma)
+                F.regexp_replace(
+                    # Then try pattern 2 (key with leading comma)  
+                    F.regexp_replace(
+                        # Finally pattern 3 (only key - will leave empty {})
+                        F.regexp_replace(
+                            F.col("_rescued_data"),
+                            pattern3,
+                            ""
+                        ),
+                        pattern2,
+                        ""
+                    ),
+                    pattern1,
+                    ""
+                )
+            ).otherwise(F.col("_rescued_data"))
+        )
+    
+    # Clean up empty JSON objects {} that may result from removing all keys
+    df = df.withColumn(
+        "_rescued_data",
+        F.when(
+            F.col("_rescued_data").rlike(r'^\s*\{\s*\}\s*$'),
+            F.lit(None).cast("string")
+        ).otherwise(F.col("_rescued_data"))
+    )
+    
+    # =========================================================================
+    # STEP 2: Clear Pure Artifacts
+    # =========================================================================
+    
+    # After Step 1, _rescued_data should only contain:
+    # - Known artifacts (_c0, _file_path) → Clear these
+    # - Unknown columns (real drift) → Preserve these
+    
+    has_c0 = F.col("_rescued_data").contains('"_c0"')
+    has_file_path = F.col("_rescued_data").contains('"_file_path"')
+    is_small = F.length(F.col("_rescued_data")) < 200
+    
+    # Check for any other keys besides _c0 and _file_path
+    # Simple heuristic: if it contains other quoted keys, it has business columns
+    # We already extracted known variants in Step 1, so anything else is truly new/unknown
+    
+    # Count JSON keys (rough heuristic using comma count)
+    # This is imperfect but good enough for artifact detection
+    # More sophisticated: use from_json, but that requires schema
+    
+    # Simpler: Check if after removing _c0 and _file_path patterns, anything remains
+    # Use regex to remove both known artifacts and check if substantive content remains
+    
+    temp_cleaned = F.regexp_replace(
+        F.regexp_replace(
+            F.coalesce(F.col("_rescued_data"), F.lit("")),
+            r'"_c0":"[^"]*"', ""
+        ),
+        r'"_file_path":"[^"]*"', ""
+    )
+    # Remove leftover JSON punctuation
+    temp_cleaned = F.regexp_replace(temp_cleaned, r'[\{\}:,\s]', '')
+    
+    # If temp_cleaned is empty (or just quotes), then only artifacts were present
+    has_other_content = F.length(temp_cleaned) > 2
+    
+    # Pure artifact if: has known artifacts AND small AND no other content
+    is_pure_artifact = (
+        (has_c0 | has_file_path) &
+        is_small &
+        ~has_other_content
+    )
+    
+    # Set tracking flag
+    df = df.withColumn("_index_col_dropped", is_pure_artifact)
+    
+    # Clear _rescued_data for pure artifacts
+    df = df.withColumn(
+        "_rescued_data",
+        F.when(is_pure_artifact, F.lit(None).cast("string"))
+         .otherwise(F.col("_rescued_data"))
+    )
+    
+    return df

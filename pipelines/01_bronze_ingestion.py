@@ -21,13 +21,13 @@ from pyspark.sql.types import StringType
 
 # Import helper functions (adjust path if running locally)
 try:
-    from pipelines.utils.helpers import strip_utf8_bom, add_lineage_columns
+    from pipelines.utils.helpers import strip_utf8_bom, add_lineage_columns, clear_index_artifact_from_rescued_data
 except ImportError:
     # Fallback for DLT runtime (adds parent to path)
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent.parent))
-    from utils.helpers import strip_utf8_bom, add_lineage_columns
+    from utils.helpers import strip_utf8_bom, add_lineage_columns, clear_index_artifact_from_rescued_data
 
 
 # ==============================================================================
@@ -52,7 +52,6 @@ BASE_AUTO_LOADER_OPTIONS = {
     "quote": '"'
 }
 
-
 def get_auto_loader_options(dataset_type: str) -> dict:
     """Get Auto Loader options with dataset-specific schema location.
     
@@ -69,7 +68,7 @@ def get_auto_loader_options(dataset_type: str) -> dict:
 
 @dlt.table(
     name="dev_iedr.bronze.circuits_raw",
-    comment="Raw circuit/feeder data from all utilities (shared table)",
+    comment="Raw circuit/feeder data from all utilities (shared table). Note: _index_col_dropped=True indicates source CSV had spurious index column (removed during ingest).",
     table_properties={
         "quality": "bronze",
         "delta.enableChangeDataFeed": "true"
@@ -93,6 +92,12 @@ def circuits_raw():
     # Strip UTF-8 BOM from column names (utility 2 issue)
     df = strip_utf8_bom(df)
     
+    # Clear index artifacts AND extract case-variant columns from _rescued_data
+    # (e.g., utility2's 'shape_length' -> 'Shape_Length')
+    df = clear_index_artifact_from_rescued_data(df)
+    
+    
+    
     # Add lineage columns (Bronze-specific: includes source_file, utility_id, file_signature)
     df = add_lineage_columns(
         df, 
@@ -109,7 +114,7 @@ def circuits_raw():
 
 @dlt.table(
     name="dev_iedr.bronze.der_installed_raw",
-    comment="Raw installed DER data from all utilities (shared table)",
+    comment="Raw installed DER data from all utilities (shared table). Note: _index_col_dropped=True indicates source CSV had spurious index column.",
     table_properties={
         "quality": "bronze",
         "delta.enableChangeDataFeed": "true"
@@ -132,6 +137,11 @@ def der_installed_raw():
     # Strip UTF-8 BOM from column names
     df = strip_utf8_bom(df)
     
+    # Clear index artifacts from _rescued_data (but preserve real schema drift)
+    df = clear_index_artifact_from_rescued_data(df)
+    
+    
+    
     # Add lineage columns
     df = add_lineage_columns(
         df,
@@ -148,7 +158,7 @@ def der_installed_raw():
 
 @dlt.table(
     name="dev_iedr.bronze.der_planned_raw",
-    comment="Raw planned DER data from all utilities (shared table)",
+    comment="Raw planned DER data from all utilities (shared table). Note: _index_col_dropped=True indicates source CSV had spurious index column.",
     table_properties={
         "quality": "bronze",
         "delta.enableChangeDataFeed": "true"
@@ -170,6 +180,11 @@ def der_planned_raw():
     
     # Strip UTF-8 BOM from column names
     df = strip_utf8_bom(df)
+    
+    # Clear index artifacts from _rescued_data (but preserve real schema drift)
+    df = clear_index_artifact_from_rescued_data(df)
+    
+    
     
     # Add lineage columns
     df = add_lineage_columns(
@@ -217,7 +232,8 @@ def file_tracking():
         F.lit("circuits").alias("dataset_type"),
         F.col("ingestion_timestamp"),
         F.col("pipeline_update_id"),
-        F.lit("SUCCEEDED").alias("status")
+        F.lit("SUCCEEDED").alias("status"),
+        F.col("_index_col_dropped").cast("int").alias("had_index_column_artifact")
     )
     
     der_installed = dlt.read_stream("dev_iedr.bronze.der_installed_raw").select(
@@ -228,7 +244,8 @@ def file_tracking():
         F.lit("der_installed").alias("dataset_type"),
         F.col("ingestion_timestamp"),
         F.col("pipeline_update_id"),
-        F.lit("SUCCEEDED").alias("status")
+        F.lit("SUCCEEDED").alias("status"),
+        F.col("_index_col_dropped").cast("int").alias("had_index_column_artifact")
     )
     
     der_planned = dlt.read_stream("dev_iedr.bronze.der_planned_raw").select(
@@ -239,7 +256,8 @@ def file_tracking():
         F.lit("der_planned").alias("dataset_type"),
         F.col("ingestion_timestamp"),
         F.col("pipeline_update_id"),
-        F.lit("SUCCEEDED").alias("status")
+        F.lit("SUCCEEDED").alias("status"),
+        F.col("_index_col_dropped").cast("int").alias("had_index_column_artifact")
     )
     
     # Union all streams and deduplicate by file_signature (one row per file)

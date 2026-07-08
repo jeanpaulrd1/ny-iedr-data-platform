@@ -18,6 +18,20 @@
   - Computed columns (`utility_id`) cannot be used for clustering at ingestion
   - Optimization deferred to Silver/Gold layers where columns are materialized
 * Schema evolution enabled (`addNewColumns` mode)
+* **Artifact Handling & Case Sensitivity Resolution:**
+  - **Two-step extraction and clearing** via `clear_index_artifact_from_rescued_data()`
+  - **Step 1**: Extract business columns with case variations from `_rescued_data`
+    - Example: utility2's `shape_length` (lowercase) → `Shape_Length` (Title Case)
+    - Auto Loader's case-sensitive matching routes lowercase variants to `_rescued_data`
+    - Function extracts known case variants, populates canonical columns, removes from `_rescued_data`
+  - **Step 2**: Clear pure structural artifacts
+    - `_c0`: Index column from empty-named CSV first column (sequential numeric values)
+    - `_file_path`: Duplicate metadata (already in `source_file` column)
+    - Cleared to NULL if only artifacts remain after extraction
+  - **Tracking**: `_index_col_dropped` flag indicates artifact processing occurred
+  - **Result**: All 66,448 records pass `schema_drift_detected` expectation
+    - utility1: 64,539 records (pure artifacts cleared)
+    - utility2: 1,909 records (shape_length extracted, artifacts cleared)
 * File tracking with `file_signature` and `pipeline_update_id` for idempotency
 * Change data feed enabled for downstream CDC processing
 
@@ -103,6 +117,89 @@
 
 ---
 
+
+### 8. Artifact Handling & Case Sensitivity
+
+**Problem**: Multi-utility CSV exports contain structural artifacts and case variations:
+* **Index columns**: utility1's exports have unnamed first column (auto-numbered by pandas)
+  - Auto Loader names it `_c0`, routes to `_rescued_data` (no schema match)
+* **Duplicate metadata**: `_file_path` in `_rescued_data` duplicates `source_file` column
+* **Case sensitivity**: Same business column with different casing across utilities
+  - utility1: `Shape_Length` (Title Case)
+  - utility2: `shape_length` (lowercase)
+  - Auto Loader's case-sensitive matching treats these as different columns
+
+**Challenge**: Auto Loader processes schema before transformation code runs:
+1. Auto Loader reads CSV → Matches columns to cached schema (case-sensitive)
+2. Unmatched columns → routed to `_rescued_data`
+3. **Then** transformation functions run (too late to intercept)
+
+**Solution**: Two-step extraction and clearing in `clear_index_artifact_from_rescued_data()`:
+
+**Step 1 - Extract Business Columns:**
+* Parse `_rescued_data` JSON for known case-variant columns
+* Extract values using `get_json_object()`
+* Populate canonical column (e.g., `shape_length` → `Shape_Length`)
+* Remove extracted keys from `_rescued_data` using `regexp_replace()`
+
+**Step 2 - Clear Pure Artifacts:**
+* After extraction, check what remains in `_rescued_data`
+* If only `_c0` and/or `_file_path` → Clear to NULL (pure artifacts)
+* If other unknown keys remain → Preserve (real schema drift)
+* Set `_index_col_dropped` flag for operational tracking
+
+**Case Variant Mappings** (maintained in helper function):
+```python
+case_variant_mappings = [
+    ("shape_length", "Shape_Length"),  # utility2 lowercase → utility1 Title Case
+    # Add more as discovered
+]
+```
+
+**Example Flow:**
+
+Before:
+```
+utility1: Shape_Length = "0.00078"
+          _rescued_data = {"_c0":"61488","_file_path":"..."}
+
+utility2: Shape_Length = NULL
+          _rescued_data = {"shape_length":"1.277","_file_path":"..."}
+```
+
+After Step 1 (extraction):
+```
+utility1: Shape_Length = "0.00078"
+          _rescued_data = {"_c0":"61488","_file_path":"..."}  (unchanged)
+
+utility2: Shape_Length = "1.277"  (extracted!)
+          _rescued_data = {"_file_path":"..."}  (shape_length removed)
+```
+
+After Step 2 (clearing):
+```
+utility1: Shape_Length = "0.00078"
+          _rescued_data = NULL  (only artifacts remained)
+          _index_col_dropped = True
+
+utility2: Shape_Length = "1.277"
+          _rescued_data = NULL  (only _file_path remained)
+          _index_col_dropped = True
+```
+
+**Result:**
+* All 66,448 records pass `schema_drift_detected` expectation
+* False positives eliminated (artifacts cleared)
+* Real schema drift still detected (unknown columns preserved)
+* Scalable: Add new case variants by extending `case_variant_mappings` list
+
+**Why not normalize column names before Auto Loader?**
+* Auto Loader reads files and applies schema cache before transformation code runs
+* By the time `normalize_column_names()` would execute, routing already happened
+* Extraction approach works with Auto Loader's existing schema cache
+* Non-destructive: No schema cache clearing or full re-ingestion required
+
+---
 ## 🔑 Key Design Decisions
 
 ### 1. No Partitioning or Clustering at Bronze
@@ -302,6 +399,16 @@ WHERE feeder_id = 'utility1_1105354'
 * Establish project folder structure
 
 ### Phase 2: Bronze Layer ✅ COMPLETE
+* Upload CSVs to landing zone (`/Volumes/dev_iedr/bronze/landing/{utility_id}/`)
+* Develop `helpers.py` (lineage utilities, artifact handling)
+* Build DLT pipeline `01_bronze_ingestion.py`:
+  - `circuits_raw`, `der_installed_raw`, `der_planned_raw`, `file_tracking`
+  - All with lineage columns (no partitioning/clustering)
+* **Implement two-step artifact handling:**
+  - Extract case-variant business columns from `_rescued_data`
+  - Clear structural artifacts (`_c0`, `_file_path`)
+  - Track with `_index_col_dropped` flag
+* **Data ingested**: 66,448 circuit records (100% pass expectations), 72,346 DER records
 * Upload CSVs to landing zone (`/Volumes/dev_iedr/bronze/landing/{utility_id}/`)
 * Develop `helpers.py` (lineage utilities)
 * Build DLT pipeline `01_bronze_ingestion.py`:
