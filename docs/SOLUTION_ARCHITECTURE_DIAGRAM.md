@@ -3,7 +3,7 @@
 ## 📊 High-Level Architecture
 
 ```mermaid
-graph TB
+graph LR
     subgraph "Data Sources"
         U1["🏢 Utility 1<br/>Segment-level CSVs<br/>64,539 segments<br/>Wide DER format"]
         U2["🏢 Utility 2<br/>Feeder-level CSVs<br/>1,909 feeders<br/>Narrow DER format"]
@@ -108,29 +108,30 @@ graph TB
     G5 --> APPS
     G6 --> APPS
 
-    style U1 fill:#e1f5ff
-    style U2 fill:#e1f5ff
+    %% Node Styling
+    style U1 fill:#e1f5ff,color:#000
+    style U2 fill:#e1f5ff,color:#000
     style B1 fill:#cd7f32,color:#fff
     style B2 fill:#cd7f32,color:#fff
     style B3 fill:#cd7f32,color:#fff
     style B4 fill:#cd7f32,color:#fff
     style REG fill:#ffd700,color:#000
-    style S1 fill:#c0c0c0
-    style S2 fill:#c0c0c0
-    style S3 fill:#c0c0c0
-    style S4 fill:#c0c0c0
-    style G1 fill:#ffd700
-    style G2 fill:#ffd700
-    style G3 fill:#ffd700
-    style G4 fill:#ffd700
-    style G5 fill:#ffd700
-    style G6 fill:#ffd700
-    style OBS1 fill:#ff9999
-    style OBS2 fill:#ff9999
-    style OBS3 fill:#ff9999
-    style API fill:#99ff99
-    style DASH fill:#99ff99
-    style APPS fill:#99ff99
+    style S1 fill:#c0c0c0,color:#000
+    style S2 fill:#c0c0c0,color:#000
+    style S3 fill:#c0c0c0,color:#000
+    style S4 fill:#c0c0c0,color:#000
+    style G1 fill:#ffd700,color:#000
+    style G2 fill:#ffd700,color:#000
+    style G3 fill:#ffd700,color:#000
+    style G4 fill:#ffd700,color:#000
+    style G5 fill:#ffd700,color:#000
+    style G6 fill:#ffd700,color:#000
+    style OBS1 fill:#ff9999,color:#000
+    style OBS2 fill:#ff9999,color:#000
+    style OBS3 fill:#ff9999,color:#000
+    style API fill:#99ff99,color:#000
+    style DASH fill:#99ff99,color:#000
+    style APPS fill:#99ff99,color:#000
 ```
 
 ---
