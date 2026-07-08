@@ -10,8 +10,8 @@ graph LR
     end
 
     subgraph "Landing Zone"
-        V1["📦 Volume: landing/1/<br/>Circuits, DER CSV files"]
-        V2["📦 Volume: landing/2/<br/>Circuits, DER CSV files"]
+        V1["📦 Volume: landing/utility1/<br/>Circuits, DER CSV files"]
+        V2["📦 Volume: landing/utility2/<br/>Circuits, DER CSV files"]
     end
 
     subgraph "Bronze Layer (Raw Storage)"
@@ -176,15 +176,15 @@ flowchart LR
     style BR1 fill:#cd7f32,color:#fff
     style BR2 fill:#cd7f32,color:#fff
     style BR3 fill:#cd7f32,color:#fff
-    style SR1 fill:#c0c0c0
-    style SR2 fill:#c0c0c0
-    style SR3 fill:#c0c0c0
-    style SR4 fill:#c0c0c0
-    style SR5 fill:#c0c0c0
-    style GR1 fill:#ffd700
-    style GR2 fill:#ffd700
-    style GR3 fill:#ffd700
-    style GR4 fill:#ffd700
+    style SR1 fill:#c0c0c0,color:#000
+    style SR2 fill:#c0c0c0,color:#000
+    style SR3 fill:#c0c0c0,color:#000
+    style SR4 fill:#c0c0c0,color:#000
+    style SR5 fill:#c0c0c0,color:#000
+    style GR1 fill:#ffd700,color:#000
+    style GR2 fill:#ffd700,color:#000
+    style GR3 fill:#ffd700,color:#000
+    style GR4 fill:#ffd700,color:#000
 ```
 
 ---
@@ -228,13 +228,13 @@ graph TB
     U2DP --> LOOP
 
     style REG fill:#ffd700,color:#000
-    style LOOP fill:#c0c0c0
+    style LOOP fill:#c0c0c0,color:#000
 ```
 
 **Onboarding Utility 3:**
 1. Write 3 transformer functions
 2. Add to `UTILITY_REGISTRY`
-3. Upload CSVs to `/Volumes/.../landing/3/`
+3. Upload CSVs to `/Volumes/dev_iedr/bronze/landing/utility3/`
 4. **Zero pipeline code changes** ✅
 
 ---
@@ -275,10 +275,10 @@ graph TB
     OBS2 --> ALT1
     OBS3 --> ALT2
 
-    style DQT fill:#c0c0c0
-    style ALT1 fill:#ff9999
-    style ALT2 fill:#ffcc99
-    style ALT3 fill:#ffff99
+    style DQT fill:#c0c0c0,color:#000
+    style ALT1 fill:#ff9999,color:#000
+    style ALT2 fill:#ffcc99,color:#000
+    style ALT3 fill:#ffff99,color:#000
 ```
 
 ---
