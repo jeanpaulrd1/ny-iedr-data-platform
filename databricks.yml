@@ -1,0 +1,118 @@
+# Declarative Automation Bundle for NY IEDR Data Platform
+bundle:
+  name: ny_iedr_data_platform
+
+# Include environment-specific variables
+include:
+  - resources/*.yml
+
+# Variables that can be overridden per environment
+variables:
+  catalog_name:
+    description: Unity Catalog name
+    default: dev_iedr
+  
+  landing_volume:
+    description: Landing zone volume path
+    default: /Volumes/dev_iedr/bronze/landing
+
+# Workspace configuration
+workspace:
+  root_path: /Workspace/.bundle/${bundle.name}/${bundle.target}
+
+# Define resources (DLT pipeline)
+resources:
+  pipelines:
+    ny_iedr_pipeline:
+      name: ${var.catalog_name}_pipeline
+      
+      # Pipeline mode: TRIGGERED (runs on-demand or schedule)
+      continuous: false
+      
+      # Development mode (cheaper, faster iteration)
+      development: true
+      
+      # Edition: ADVANCED (required for SCD Type 2)
+      edition: ADVANCED
+      
+      # Photon acceleration
+      photon: true
+      
+      # Serverless compute (auto-scaling)
+      # Set to null to use classic compute
+      serverless: true
+      
+      # Unity Catalog target
+      catalog: ${var.catalog_name}
+      target: silver  # Default schema for tables
+      
+      # Pipeline libraries (your code)
+      libraries:
+        - notebook:
+            path: ./pipelines/01_bronze_ingestion.py
+        - notebook:
+            path: ./pipelines/02_silver_transformations.py
+        - notebook:
+            path: ./pipelines/03_gold_scd2.py
+        - notebook:
+            path: ./pipelines/04_gold_api_views.py
+      
+      # Configuration (accessible in pipeline code)
+      configuration:
+        landing_volume_path: ${var.landing_volume}
+        catalog_name: ${var.catalog_name}
+      
+      # Notifications (optional)
+      notifications:
+        - email_recipients:
+            - jeanpaulrd1@gmail.com
+          alerts:
+            - on-update-failure
+            - on-update-fatal-failure
+      
+      # Change Data Capture (for SCD2)
+      enable_change_data_feed: true
+
+# Environment targets
+targets:
+  # Development environment
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-5e6da03e-1613.cloud.databricks.com
+    
+    variables:
+      catalog_name: dev_iedr
+      landing_volume: /Volumes/dev_iedr/bronze/landing
+    
+    resources:
+      pipelines:
+        ny_iedr_pipeline:
+          development: true
+          serverless: true
+  
+  # Production environment
+  prod:
+    mode: production
+    workspace:
+      host: https://dbc-5e6da03e-1613.cloud.databricks.com
+    
+    variables:
+      catalog_name: prod_iedr
+      landing_volume: /Volumes/prod_iedr/bronze/landing
+    
+    resources:
+      pipelines:
+        ny_iedr_pipeline:
+          development: false
+          serverless: true
+          
+          # Production-specific settings
+          notifications:
+            - email_recipients:
+                - jeanpaulrd1@gmail.com
+              alerts:
+                - on-update-failure
+                - on-update-fatal-failure
+                - on-flow-failure
