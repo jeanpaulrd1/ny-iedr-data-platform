@@ -452,7 +452,7 @@ WHERE feeder_id = 'utility1_1105354'
 ## 📈 Scalability Considerations
 
 * **Current Scale**: 2 utilities (utility1, utility2), 269 feeders, ~72K DER projects
-* **Future Scale**: 8 utilities, ~50K feeders, ~5M DER projects
+* **Future Scale**: 5 utilities, ~50K feeders, ~5M DER projects
 * **Auto Loader**: Handles incremental file arrivals efficiently
 * **Liquid Clustering**: Adapts to data skew across utilities automatically
 * **SCD Type 2 (Gold)**: Manages historical growth without performance degradation
@@ -499,7 +499,6 @@ WHERE feeder_id = 'utility1_1105354'
 * **Version Control**: Git (GitHub repository: `ny-iedr-data-platform`)
 * **Testing**: pytest + PySpark (unit tests for transformations)
 * **Pipeline Mode**: Triggered (not continuous)
-* **Edition**: ADVANCED (required for SCD2 and Auto CDC)
 
 ---
 
@@ -600,7 +599,6 @@ WHERE feeder_id = 'utility1_1105354'
   * Better representation of true feeder capacity than MAX approach
   * No performance impact (MODE is native PySpark function)
   * Tested and validated: All 291 feeders processed correctly
-* **Documentation**: See `docs/MODE_TEST_RESULTS.md` for complete testing validation
 
 ---
 
