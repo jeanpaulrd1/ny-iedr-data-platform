@@ -1,0 +1,116 @@
+[project]
+name = "ny-iedr-data-platform"
+version = "1.0.0"
+description = "Medallion architecture data lakehouse for NY IEDR using Databricks + Unity Catalog"
+authors = [
+    {name = "Jean Paul Rodriguez", email = "jeanpaulrd1@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.10,<4.0"
+license = {text = "MIT"}
+
+dependencies = [
+    "great-expectations>=0.18.0,<1.0.0",
+    "python-dotenv>=1.0.0,<2.0.0",
+    "pyyaml>=6.0,<7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0,<8.0.0",
+    "pytest-cov>=4.1.0,<5.0.0",
+    "pytest-mock>=3.11.0,<4.0.0",
+    "chispa>=0.9.0,<1.0.0",
+    "ruff>=0.1.0,<1.0.0",
+    "mypy>=1.5.0,<2.0.0",
+    "pre-commit>=3.4.0,<4.0.0",
+    "ipython>=8.15.0,<9.0.0",
+    "jupyter>=1.0.0,<2.0.0",
+    "mkdocs>=1.5.0,<2.0.0",
+    "mkdocs-material>=9.2.0,<10.0.0",
+]
+
+[project.urls]
+Repository = "https://github.com/jeanpaulrd1/ny-iedr-data-platform"
+Documentation = "https://github.com/jeanpaulrd1/ny-iedr-data-platform/blob/main/README.md"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# Ruff configuration (linter + formatter)
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [".venv", "__pycache__", "*.egg-info"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line-too-long (handled by formatter)
+    "B008",  # do not perform function calls in argument defaults
+    "B904",  # raise-without-from-inside-except
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B", "F401", "F841"]  # Allow unused imports/vars in tests
+
+# Pytest configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--verbose",
+    "--cov=pipelines",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-report=xml",
+]
+markers = [
+    "unit: Unit tests (fast, no external dependencies)",
+    "integration: Integration tests (may require Databricks cluster)",
+    "slow: Slow tests (network/IO intensive)",
+]
+
+# MyPy type checking configuration
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false  # Gradual typing
+check_untyped_defs = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["pipelines"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]

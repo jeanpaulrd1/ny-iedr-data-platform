@@ -15,15 +15,25 @@ Views:
 1. feeders_with_capacity: Current feeder capacity and availability (installed + planned)
 2. feeder_der_summary: DER count and capacity aggregated by feeder (all 14 types)
 
-Technology Types (14 total - MUST MATCH unpivot_utility1_der in schema_normalization.py):
-- SolarPV, EnergyStorageSystem, Wind, MicroTurbine, SynchronousGenerator
-- InductionGenerator, FarmWaste, FuelCell, CombinedHeatandPower, GasTurbine
-- Hydro, InternalCombustionEngine, SteamTurbine, Other
+Technology Types: imported from schema_normalization.UTILITY1_DER_TECH_COLUMNS.
+Do NOT hardcode a second copy of this list here. A prior version of this file
+maintained its own 14-name list that drifted from schema_normalization.py —
+different casing, different names, missing entries, phantom entries — causing
+10 of 14 per-technology aggregation columns to silently return zero for every
+feeder. Importing the constant makes that class of bug structurally impossible.
 """
 
 import dlt
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+
+try:
+    from pipelines.utils.schema_normalization import UTILITY1_DER_TECH_COLUMNS
+except ImportError:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from utils.schema_normalization import UTILITY1_DER_TECH_COLUMNS
 
 
 # ==============================================================================
@@ -220,14 +230,10 @@ def feeder_der_summary():
     # Union all DER (installed + planned)
     all_der = der_installed_tagged.unionByName(der_planned_tagged)
     
-    # Technology list from unpivot_utility1_der in schema_normalization.py
-    # IMPORTANT: These names must match exactly what Silver produces.
-    # Any mismatch causes that technology's aggregations to silently return 0.
-    tech_types = [
-        "SolarPV", "EnergyStorageSystem", "Wind", "CombinedHeatAndPower",
-        "Biomass", "Biogas", "Geothermal", "HydroElectric", "InternalCombustion",
-        "Microturbine", "NaturalGas", "SteamTurbine", "Waste", "Other"
-    ]
+    # Technology list — imported from schema_normalization.py, never hardcoded here.
+    # This guarantees these names always match exactly what Silver produces,
+    # since both this file and the unpivot read from the same constant.
+    tech_types = UTILITY1_DER_TECH_COLUMNS
     
     # Base aggregations
     agg_expressions = [
