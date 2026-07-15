@@ -1,0 +1,17 @@
+# NY IEDR Data Platform - Runtime Dependencies
+# Compatible with Databricks Runtime 14.3+ (Python 3.10+)
+
+# Core Dependencies (provided by Databricks Runtime)
+# pyspark - Included in DBR
+# delta-spark - Included in DBR  
+# databricks-sdk - Included in DBR
+
+# Delta Live Tables (DLT) - Included in DBR
+# dlt - Included in pipelines runtime
+
+# Data Quality & Validation
+great-expectations>=0.18.0,<1.0.0
+
+# Utilities
+python-dotenv>=1.0.0,<2.0.0
+pyyaml>=6.0,<7.0

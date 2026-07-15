@@ -38,6 +38,67 @@ UTILITY2_ID = "utility2"
 # If the column doesn't exist, planned_installation_date will be NULL for utility 1.
 UTILITY1_PLANNED_DATE_COL = "InServiceDate"
 
+# ==============================================================================
+# CANONICAL DER TECHNOLOGY LIST — SINGLE SOURCE OF TRUTH
+# ==============================================================================
+# This is the ONLY place these 14 technology names are defined. Any code that
+# needs the technology list (unpivot, gold aggregations, tests) MUST import
+# this constant rather than hardcoding a second copy.
+#
+# Root cause this prevents: 04_gold_api_views.py previously hardcoded its own
+# 14-name list that had drifted from this one — different casing
+# (MicroTurbine vs Microturbine), different names (Hydro vs HydroElectric,
+# GasTurbine vs NaturalGas), missing entries (SynchronousGenerator,
+# InductionGenerator, FuelCell), and phantom entries that don't exist in the
+# source data at all (Biomass, Biogas, Geothermal). Only 4 of 14 names
+# matched, so 10 of 14 per-technology aggregation columns in
+# feeder_der_summary silently returned zero for every feeder.
+#
+# These names come directly from utility 1's source CSV one-hot columns —
+# verify against utility1_install_der.csv / utility1_planned_der.csv headers
+# before changing.
+UTILITY1_DER_TECH_COLUMNS = [
+    "SolarPV", "EnergyStorageSystem", "Wind", "MicroTurbine",
+    "SynchronousGenerator", "InductionGenerator", "FarmWaste", "FuelCell",
+    "CombinedHeatandPower", "GasTurbine", "Hydro", "InternalCombustionEngine",
+    "SteamTurbine", "Other"
+]
+
+# ==============================================================================
+# UTILITY 2 DER_TYPE → CANONICAL TECHNOLOGY MAPPING
+# ==============================================================================
+# Utility 2 reports DER_TYPE as a single free-text column (e.g. "Solar",
+# "Wind", "Storage") which does NOT match utility 1's naming convention
+# (SolarPV, Wind, EnergyStorageSystem). Without this mapping, der_type values
+# for the same real-world technology differ by utility, and any aggregation,
+# filter, or search "by technology" across utilities silently splits results
+# per-utility instead of per-technology.
+#
+# Extend this dict as new utility 2 DER_TYPE values are discovered in the
+# full dataset — the sample data only confirms "Solar" so far.
+UTILITY2_DER_TYPE_MAP = {
+    "solar": "SolarPV",
+    "solar pv": "SolarPV",
+    "wind": "Wind",
+    "storage": "EnergyStorageSystem",
+    "energy storage": "EnergyStorageSystem",
+    "battery": "EnergyStorageSystem",
+    "microturbine": "MicroTurbine",
+    "synchronous generator": "SynchronousGenerator",
+    "induction generator": "InductionGenerator",
+    "farm waste": "FarmWaste",
+    "fuel cell": "FuelCell",
+    "combined heat and power": "CombinedHeatandPower",
+    "chp": "CombinedHeatandPower",
+    "gas turbine": "GasTurbine",
+    "hydro": "Hydro",
+    "hydroelectric": "Hydro",
+    "internal combustion engine": "InternalCombustionEngine",
+    "ice": "InternalCombustionEngine",
+    "steam turbine": "SteamTurbine",
+    "other": "Other",
+}
+
 
 # ==============================================================================
 # UTILITY 1: SEGMENT AGGREGATION (Circuits)
@@ -117,13 +178,10 @@ def unpivot_utility1_der(df: DataFrame, include_installation_date: bool = False)
     Returns:
         DataFrame in narrow format with one row per (project, technology) pair
     """
-    # Technology columns to unpivot
-    tech_cols = [
-        "SolarPV", "EnergyStorageSystem", "Wind", "MicroTurbine",
-        "SynchronousGenerator", "InductionGenerator", "FarmWaste", "FuelCell",
-        "CombinedHeatandPower", "GasTurbine", "Hydro", "InternalCombustionEngine",
-        "SteamTurbine", "Other"
-    ]
+    # Technology columns to unpivot.
+    # Uses the module-level UTILITY1_DER_TECH_COLUMNS constant — the single
+    # source of truth — rather than a local copy that could drift from it.
+    tech_cols = UTILITY1_DER_TECH_COLUMNS
     
     # Build stack expression: stack(14, 'SolarPV', SolarPV, 'Wind', Wind, ...)
     # Each pair is (technology_name_literal, capacity_column_reference)
@@ -337,12 +395,34 @@ def map_der_to_canonical(df: DataFrame, der_table_type: str) -> DataFrame:
     # withColumn tries to reference a column that was excluded from a prior select().
     # The caller (silver pipeline) emits these columns as NULL for installed DER;
     # Gold filters them out when building the installed-only view.
+    #
+    # der_type standardization: utility 1's der_type is already canonical (it comes
+    # directly from UTILITY1_DER_TECH_COLUMNS via the unpivot). Utility 2's DER_TYPE
+    # is free text ("Solar", "Wind", "Storage", ...) that does NOT match utility 1's
+    # naming convention. Without mapping it, "SolarPV" (utility1) and "Solar"
+    # (utility2) would coexist as different der_type values for the same real-world
+    # technology — any cross-utility aggregation or search by technology would
+    # silently split results per-utility instead of per-technology.
+    der_type_map_expr = F.create_map([
+        F.lit(x) for pair in UTILITY2_DER_TYPE_MAP.items() for x in pair
+    ])
+
     canonical = df.select(
         F.col("utility_id"),
         F.col("der_id"),
         F.col("feeder_id"),
         F.col("native_feeder_id_raw"),
-        F.col("der_type"),
+        F.when(
+            F.col("utility_id") == UTILITY2_ID,
+            F.coalesce(
+                der_type_map_expr[F.lower(F.trim(F.col("der_type")))],
+                # Unmapped utility2 value: pass through rather than drop it,
+                # so an unrecognized technology is still visible (not silently
+                # lost) and the gap can be caught by DQ metrics or a future
+                # mapping addition, instead of the record disappearing.
+                F.col("der_type"),
+            ),
+        ).otherwise(F.col("der_type")).alias("der_type"),
         F.col("nameplate_rating_kw").cast("double").alias("nameplate_rating_kw"),
         F.lit(der_table_type).alias("der_status"),
         # Planned-specific columns: always selected, NULL for installed rows.

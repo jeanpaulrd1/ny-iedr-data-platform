@@ -42,6 +42,11 @@ Observability Enhancements (Round 4):
 19. Freshness monitoring: Track last_refresh_date and days_since_refresh
 20. Volume baseline tracking: Enable historical trend analysis
 
+DQ Gap Fixes (Round 5):
+21. Quarantine non-canonical der_type values via expect_or_quarantine
+22. Track unmapped utility2 DER_TYPE values in dedicated DQ table
+23. Alert on schema drift and mapping gaps
+
 Table Strategy:
 - Silver tables (@dlt.table): Full-refresh transformations from Bronze
 - Gold tables: SCD2 via APPLY CHANGES INTO + API views
@@ -54,9 +59,11 @@ from pyspark.sql.types import StringType
 # Import helper functions and utility registry
 from pipelines.utils.schema_normalization import (
     map_circuits_to_canonical,
-    map_der_to_canonical
+    map_der_to_canonical,
+    UTILITY1_DER_TECH_COLUMNS
 )
 from pipelines.utils.utility_registry import get_registered_utilities
+from pipelines.utils.dq_metrics import track_unmapped_der_types
 
 
 # ==============================================================================
@@ -120,6 +127,10 @@ def circuits_standardized():
 )
 @dlt.expect_or_drop("valid_utility_id", "utility_id IS NOT NULL")
 @dlt.expect_or_drop("valid_der_type", "der_type IS NOT NULL")
+@dlt.expect_or_quarantine(
+    "canonical_der_type_only",
+    f"der_type IN {tuple(UTILITY1_DER_TECH_COLUMNS)}"
+)
 def der_installed_standardized():
     """Standardize installed DER data from all utilities to narrow common schema.
     
@@ -134,7 +145,9 @@ def der_installed_standardized():
     - utility2: Direct narrow mapping
     - All: Standardize DER types, null sentinels, column names
     
-    Note: Unresolved feeders (feeder_id IS NULL) pass through for DQ tracking
+    Data Quality:
+    - Quarantines rows with non-canonical der_type values
+    - Unresolved feeders (feeder_id IS NULL) pass through for DQ tracking
     
     Returns:
         Narrow-format DER DataFrame with unified schema
@@ -172,6 +185,10 @@ def der_installed_standardized():
 )
 @dlt.expect_or_drop("valid_utility_id", "utility_id IS NOT NULL")
 @dlt.expect_or_drop("valid_der_type", "der_type IS NOT NULL")
+@dlt.expect_or_quarantine(
+    "canonical_der_type_only",
+    f"der_type IN {tuple(UTILITY1_DER_TECH_COLUMNS)}"
+)
 def der_planned_standardized():
     """Standardize planned DER data from all utilities to narrow common schema.
     
@@ -186,7 +203,9 @@ def der_planned_standardized():
     - utility2: Direct narrow mapping
     - All: Standardize DER types, null sentinels, column names
     
-    Note: Unresolved feeders (feeder_id IS NULL) pass through for DQ tracking
+    Data Quality:
+    - Quarantines rows with non-canonical der_type values
+    - Unresolved feeders (feeder_id IS NULL) pass through for DQ tracking
     
     Returns:
         Narrow-format DER DataFrame with unified schema
@@ -305,3 +324,56 @@ def data_quality_metrics_silver():
     all_dq = circuits_dq.unionByName(der_installed_dq).unionByName(der_planned_dq)
     
     return all_dq
+
+
+# ==============================================================================
+# DATA QUALITY: UNMAPPED DER_TYPE TRACKING
+# ==============================================================================
+
+@dlt.table(
+    name="dev_iedr.dq.unmapped_der_types",
+    comment="Tracks utility2 DER_TYPE values not in canonical mapping (streaming append)"
+)
+def unmapped_der_types_metric():
+    """Track utility2 DER_TYPE values that don't map to canonical names.
+    
+    This table alerts on:
+    - New DER_TYPE values from utility2 not in UTILITY2_DER_TYPE_MAP
+    - Typos in the mapping dictionary
+    - Casing/spacing variations not handled
+    
+    Quarantined Rows:
+    Rows that fail the canonical_der_type_only expectation are automatically
+    quarantined to:
+    - dev_iedr.silver.__der_installed_standardized_quarantine
+    - dev_iedr.silver.__der_planned_standardized_quarantine
+    
+    This table provides aggregated metrics for alerting/monitoring.
+    
+    Streaming Pattern:
+    - Reads from Silver DER tables (skipChangeCommits=true)
+    - Appends new metrics each pipeline run
+    - Empty result = all der_type values are canonical (good state)
+    - Non-empty = unmapped values detected (alert)
+    
+    Returns:
+        DataFrame with unmapped der_type metrics per (utility_id, der_type)
+    """
+    # Read from Silver DER tables (streaming) with skipChangeCommits
+    der_installed = (
+        spark.readStream
+        .option("skipChangeCommits", "true")
+        .table("dev_iedr.silver.der_installed_standardized")
+    )
+    
+    der_planned = (
+        spark.readStream
+        .option("skipChangeCommits", "true")
+        .table("dev_iedr.silver.der_planned_standardized")
+    )
+    
+    # Union installed + planned
+    all_der = der_installed.unionByName(der_planned, allowMissingColumns=True)
+    
+    # Track unmapped values
+    return track_unmapped_der_types(all_der)

@@ -47,6 +47,108 @@ ny-iedr-data-platform/
     └── volume_baseline_tracking.sql     # Anomaly detection query
 ```
 
+## Setup & Installation
+
+### Prerequisites
+
+* **Python 3.10+** (specified in `.python-version`)
+* **Databricks Workspace** with Unity Catalog enabled
+* **Databricks CLI** (for deployment)
+* **Git** (for version control)
+
+### Local Development Setup
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/your-org/ny-iedr-data-platform.git
+cd ny-iedr-data-platform
+
+# 2. Install dependencies
+make install-dev
+# Or manually:
+pip install -r requirements.txt -r requirements-dev.txt
+pre-commit install
+
+# 3. Run tests
+make test
+# Or:
+pytest
+
+# 4. Lint and format code
+make lint
+make format
+```
+
+### Databricks Repos Setup
+
+```bash
+# 1. Link repo to Databricks Repos (via UI or CLI)
+databricks repos create --url https://github.com/your-org/ny-iedr-data-platform.git   --path /Repos/<your-email>/ny-iedr-data-platform
+
+# 2. Validate bundle configuration
+make validate
+# Or:
+databricks bundle validate --target dev
+
+# 3. Deploy pipeline
+make deploy
+# Or:
+databricks bundle deploy --target dev
+
+# 4. Run pipeline
+make run
+# Or:
+databricks bundle run ny_iedr_pipeline --target dev
+```
+
+### Dependencies
+
+**Runtime Dependencies** (see `requirements.txt`):
+* PySpark, Delta Lake, Databricks SDK - Included in Databricks Runtime
+* `dlt` - Included in DLT pipeline runtime
+* `great-expectations` - Data quality validation
+* `python-dotenv`, `pyyaml` - Configuration utilities
+
+**Development Dependencies** (see `requirements-dev.txt`):
+* `pytest`, `pytest-cov`, `chispa` - Testing framework
+* `ruff` - Fast linting & formatting (replaces flake8, black, isort)
+* `mypy` - Type checking
+* `pre-commit` - Git hooks for code quality
+
+### Configuration Files
+
+* **`pyproject.toml`** - Modern Python project configuration (PEP 518)
+* **`requirements.txt`** - Runtime dependencies
+* **`requirements-dev.txt`** - Development dependencies
+* **`.python-version`** - Python version specification (3.10.12)
+* **`Makefile`** - Common development tasks
+* **`.pre-commit-config.yaml`** - Pre-commit hooks (ruff, mypy, YAML lint)
+* **`databricks.yml`** - Declarative Automation Bundle (DABs) configuration
+
+### Makefile Commands
+
+```bash
+# Setup
+make install          # Install runtime dependencies
+make install-dev      # Install all dependencies (runtime + dev)
+
+# Development
+make test             # Run all tests with coverage
+make test-unit        # Run unit tests only
+make lint             # Run linter (ruff)
+make lint-fix         # Auto-fix linting issues
+make format           # Auto-format code (ruff)
+make type-check       # Run type checker (mypy)
+make clean            # Remove build artifacts
+
+# Databricks
+make validate         # Validate DABs bundle
+make deploy           # Deploy to dev environment
+make deploy-prod      # Deploy to production
+make run              # Run pipeline in dev environment
+make check-all        # Run all checks (lint + format + type + test)
+```
+
 ## Quick Start
 
 ### Unity Catalog Setup
@@ -77,8 +179,9 @@ CREATE VOLUME IF NOT EXISTS dev_iedr.bronze.metadata;
 1. Clone repo to Databricks Repos
 2. Create feature branch for your work
 3. Develop and test on feature branch
-4. Run unit tests: `pytest tests/`
-5. Merge to main when stable
+4. Run unit tests: `make test` or `pytest tests/`
+5. Lint and format: `make lint && make format`
+6. Merge to main when stable
 
 ## Current Status (2026-07-08)
 
